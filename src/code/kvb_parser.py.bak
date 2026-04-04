@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+import os
+import re
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import fitz
+import pytesseract
+from PIL import Image
+
+from parser_helpers import build_record
+from utils import clean_cell, parse_amount
+
+RENDER_ZOOM = 2.0
+ROW_RE = re.compile(
+    r"^(?P<date>\d{2}-\d{2}-\d{4})\s+"
+    r"(?P<time>\d{2}:\d{2}:\d{2})\s+"
+    r"(?P<value_date>\d{2}-\d{2}-\d{4})\s+"
+    r"(?P<body>.+?)\s+"
+    r"(?P<amount>[0-9,]+\.\d{2})\s+"
+    r"(?P<balance>[0-9,]+\.\d{2}[\]\)\}]?)$"
+)
+OPENING_BALANCE_RE = re.compile(r"Opening Balance.*?([0-9,]+\.\d{2})")
+DATE_FORMATS = ("%d-%m-%Y",)
+FOOTER_PREFIXES = ("Page No.",)
+HEADER_PREFIXES = (
+    "Account Statement",
+    "as of ",
+    "Account Name ",
+    "Account Holder(s) Name",
+    "Account Number ",
+    "Branch ",
+    "Customer Id ",
+    "Account Currency ",
+    "Opening Balance ",
+    "Closing Balance ",
+    "Searched by ",
+    "From Date ",
+    "To Date ",
+    "Transaction Date Value Date",
+)
+CREDIT_HINTS = (
+    "CASH DEP",
+    "DEPOSIT",
+    "NEFT CR",
+    "CR-",
+    "CREDIT",
+    "REVERSAL",
+)
+DEBIT_HINTS = (
+    "CHQ PAID",
+    "WITHDRAWL",
+    "WITHDRAWAL",
+    "CHARGES",
+    "BILLDESK",
+    "DEBIT",
+    "IMPS-",
+    "SBIEPAY",
+)
+
+
+@dataclass
+class PendingRecord:
+    date_text: str
+    body_text: str
+    amount_text: str
+    balance_text: str
+    continuation_lines: list[str] = field(default_factory=list)
+    cheque_no: str = ""
+
+
+def _configure_tesseract() -> str:
+    candidates: list[Path] = []
+
+    env_value = os.environ.get("TESSERACT_CMD")
+    if env_value:
+        candidates.append(Path(env_value))
+
+    resolved = shutil.which("tesseract")
+    if resolved:
+        candidates.append(Path(resolved))
+
+    candidates.extend(
+        [
+            Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+            Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate.is_file():
+            pytesseract.pytesseract.tesseract_cmd = str(candidate)
+            return str(candidate)
+
+    raise FileNotFoundError(
+        "Tesseract executable not found. Install Tesseract OCR or set TESSERACT_CMD to the full path."
+    )
+
+
+def _render_page_text(page: fitz.Page) -> str:
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(RENDER_ZOOM, RENDER_ZOOM), alpha=False)
+    image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+    return pytesseract.image_to_string(image, config="--psm 6")
+
+
+def _clean_ocr_line(raw_line: str) -> str:
+    return clean_cell(raw_line)
+
+def _should_skip_line(line: str) -> bool:
+    if not line:
+        return True
+    if any(line.startswith(prefix) for prefix in FOOTER_PREFIXES):
+        return True
+    return any(line.startswith(prefix) for prefix in HEADER_PREFIXES)
+
+
+def _split_body(body_text: str) -> tuple[str, str]:
+    text = clean_cell(body_text).replace("|", " ")
+    parts = [part for part in text.split() if part]
+    if parts and parts[0].isdigit() and len(parts[0]) == 4:
+        parts.pop(0)
+
+    cheque_no = ""
+    if parts and re.fullmatch(r"[0-9$]{3,}", parts[0]):
+        cheque_no = parts.pop(0)
+
+    return clean_cell(" ".join(parts)), cheque_no
+
+
+def _classify_amount(
+    details: str,
+    amount_value: float,
+    balance_value: float,
+    previous_balance: float | None,
+) -> tuple[float | None, float | None]:
+    if previous_balance is not None:
+        if abs((previous_balance + amount_value) - balance_value) <= 1.0:
+            return None, amount_value
+        if abs((previous_balance - amount_value) - balance_value) <= 1.0:
+            return amount_value, None
+
+    upper_details = details.upper()
+    if any(token in upper_details for token in CREDIT_HINTS) and not any(
+        token in upper_details for token in DEBIT_HINTS
+    ):
+        return None, amount_value
+    return amount_value, None
+
+
+def _finalize_record(
+    pending: PendingRecord,
+    previous_balance: float | None,
+) -> tuple[dict[str, Any], float | None]:
+    details_text = clean_cell(" ".join([pending.body_text, *pending.continuation_lines]))
+    amount_value = parse_amount(pending.amount_text)
+    balance_value = parse_amount(pending.balance_text)
+
+    debit: float | None = None
+    credit: float | None = None
+    if amount_value is not None and balance_value is not None:
+        debit, credit = _classify_amount(details_text, amount_value, balance_value, previous_balance)
+
+    record = build_record(
+        date_text=pending.date_text,
+        details=details_text,
+        cheque_no=pending.cheque_no,
+        debit=debit,
+        credit=credit,
+        balance=balance_value,
+        date_formats=DATE_FORMATS,
+    )
+    next_balance = balance_value if balance_value is not None else previous_balance
+    return record, next_balance
+
+
+def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
+    tesseract_cmd = _configure_tesseract()
+    logger.info("Parsing KVB statement with OCR: %s | tesseract=%s", pdf_path, tesseract_cmd)
+
+    records: list[dict[str, Any]] = []
+    previous_balance: float | None = None
+    pending: PendingRecord | None = None
+
+    with fitz.open(pdf_path) as pdf:
+        for page_idx, page in enumerate(pdf, start=1):
+            text = _render_page_text(page)
+            lines = text.splitlines()
+            logger.debug("Page %s: OCR extracted %s line(s)", page_idx, len(lines))
+
+            for raw_line in lines:
+                line = _clean_ocr_line(raw_line)
+                if not line:
+                    continue
+
+                opening_match = OPENING_BALANCE_RE.search(line)
+                if opening_match and previous_balance is None:
+                    previous_balance = parse_amount(opening_match.group(1))
+                    continue
+
+                if _should_skip_line(line):
+                    continue
+
+                match = ROW_RE.match(line)
+                if match:
+                    if pending is not None:
+                        record, previous_balance = _finalize_record(pending, previous_balance)
+                        records.append(record)
+                        if progress_cb is not None:
+                            progress_cb(len(records))
+
+                    details, cheque_no = _split_body(match.group("body"))
+                    pending = PendingRecord(
+                        date_text=match.group("date"),
+                        body_text=details,
+                        amount_text=match.group("amount"),
+                        balance_text=match.group("balance"),
+                        cheque_no=cheque_no,
+                    )
+                    continue
+
+                if pending is not None and not _should_skip_line(line):
+                    pending.continuation_lines.append(line)
+
+    if pending is not None:
+        record, previous_balance = _finalize_record(pending, previous_balance)
+        records.append(record)
+        if progress_cb is not None:
+            progress_cb(len(records))
+
+    for index, record in enumerate(records, start=1):
+        record["Sno"] = index
+
+    logger.info("KVB parse complete: rows=%s ending_balance=%s", len(records), previous_balance)
+    return records
+

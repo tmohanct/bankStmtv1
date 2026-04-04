@@ -1,0 +1,789 @@
+import re
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+from utils import OUTPUT_COLUMNS, clean_detail, compact_detail_key, sanitize_cheque_column
+
+FONT_NORMAL = Font(name="Aptos", size=10)
+FONT_HEADER = Font(name="Aptos", size=10, bold=True)
+FONT_FOOTNOTE = Font(name="Aptos", size=10, italic=True)
+ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+ALIGN_LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
+ALIGN_RIGHT = Alignment(horizontal="right", vertical="center", wrap_text=True)
+HEADER_FILL = PatternFill(fill_type="solid", fgColor="D9E1F2")
+ALT_ROW_FILLS = [
+    PatternFill(fill_type="solid", fgColor="EAF3FB"),
+    PatternFill(fill_type="solid", fgColor="F8F1E5"),
+]
+MONTH_LABEL_FILL = PatternFill(fill_type="solid", fgColor="C9D5EA")
+MONTH_VALUE_ROW_FILLS = [
+    PatternFill(fill_type="solid", fgColor="F2F2F2"),
+    PatternFill(fill_type="solid", fgColor="FFFFFF"),
+]
+REPEAT_GROUP_FILLS = [
+    PatternFill(fill_type="solid", fgColor="FCE4D6"),
+    PatternFill(fill_type="solid", fgColor="D9EAD3"),
+    PatternFill(fill_type="solid", fgColor="D9E1F2"),
+]
+INDIAN_NUMBER_FORMAT = "#,##,##0.00"
+INDIAN_NUMBER_FORMAT_NO_DECIMAL = "#,##,##0"
+DATE_NUMBER_FORMAT = "yyyy-mm-dd"
+DATE_INPUT_FORMATS = ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y")
+AMOUNT_COLUMN_WIDTH = 16
+THIN_BORDER = Border(
+    left=Side(style="thin", color="BFBFBF"),
+    right=Side(style="thin", color="BFBFBF"),
+    top=Side(style="thin", color="BFBFBF"),
+    bottom=Side(style="thin", color="BFBFBF"),
+)
+MONTH_DR_CR_FOOTNOTE = "#.OF Dr/Cr & Avg takes only amount Greater than 30. Less than 30 not counted."
+DIRECT_RETURN_REJECT_MARKERS = (
+    "WCHQRET",
+    "CHQRETURN",
+    "CHQRET",
+    "CHEQUERETURN",
+    "CHEQUERET",
+    "IWCHQRETURN",
+    "IWCHQRET",
+    "BRNOWRTNCLG",
+    "RETURNED",
+    "REJECT",
+    "REJECTED",
+    "IWREJINST",
+    "DISHONOUR",
+    "DISHONOR",
+)
+RETURN_RELATED_CHARGE_MARKERS = (
+    "RETURNCHARGE",
+    "RETURNCHARGES",
+    "RETURNCHG",
+    "RETURNCHGS",
+    "CHQRETURNCHG",
+    "CHQRETURNCHGS",
+    "CHQRTNCHRG",
+    "CHQRTNCHRGS",
+    "RTNCHQCHGS",
+    "ACHRTNCHRG",
+    "RTNCHG",
+    "RTNCHRGS",
+)
+ELECTRONIC_RETURN_MARKERS = ("NEFT", "RTGS", "IMPS")
+
+
+def _sanitize_sheet_name(name: str) -> str:
+    safe = re.sub(r"[\\/*?:\[\]]", "_", str(name).strip())
+    safe = safe or "Sheet"
+    return safe[:31]
+
+
+def _unique_sheet_name(name: str, used_names: set[str]) -> str:
+    base = _sanitize_sheet_name(name)
+    candidate = base
+    index = 1
+    while candidate in used_names:
+        suffix = f"_{index}"
+        candidate = f"{base[:31 - len(suffix)]}{suffix}"
+        index += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _normalize_header(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _coerce_excel_date(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+
+    if isinstance(value, datetime):
+        return value
+
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+
+    if hasattr(value, "to_pydatetime"):
+        try:
+            py_dt = value.to_pydatetime()
+            if isinstance(py_dt, datetime):
+                return py_dt
+            if isinstance(py_dt, date):
+                return datetime.combine(py_dt, datetime.min.time())
+        except Exception:  # noqa: BLE001
+            pass
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    for fmt in DATE_INPUT_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _ensure_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    output = frame.copy()
+    for col in OUTPUT_COLUMNS:
+        if col not in output.columns:
+            output[col] = None
+    for amount_col in ("Debit", "Credit"):
+        output[amount_col] = pd.to_numeric(output[amount_col], errors="coerce").fillna(0.0)
+    output = sanitize_cheque_column(output)
+    return output[OUTPUT_COLUMNS]
+
+
+def _first_present_column(lower_map: dict[str, Any], *keys: str) -> Any | None:
+    for key in keys:
+        if key in lower_map:
+            return lower_map[key]
+    return None
+
+
+def _parse_rule_amount(value: Any) -> float | None:
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    cleaned = text.replace(",", "").replace(" ", "")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _normalize_rule_text(value: Any) -> str:
+    return compact_detail_key(value).upper()
+
+
+def _load_rules(rules_path: Path, logger) -> list[dict[str, Any]]:
+    if not rules_path.is_file():
+        logger.warning("Rules file not found: %s", rules_path)
+        return []
+
+    rules_df = pd.read_excel(rules_path, sheet_name=0)
+    if rules_df.empty:
+        logger.info("Rules file is empty: %s", rules_path)
+        return []
+
+    lower_map = {str(col).strip().lower(): col for col in rules_df.columns}
+
+    category_col = _first_present_column(lower_map, "category")
+    subcategory_col = _first_present_column(
+        lower_map,
+        "subcategory",
+        "sub_category",
+        "sub category",
+        "name",
+        "keyword",
+        "search_name",
+        "searchname",
+        "match",
+    )
+    sheet_col = _first_present_column(lower_map, "sheetname", "sheet_name", "sheet")
+    order_col = _first_present_column(lower_map, "sheet_order", "sheetorder", "sheet order", "order")
+
+    if subcategory_col is None or sheet_col is None:
+        logger.warning(
+            "Rules missing required columns. Found columns: %s",
+            list(rules_df.columns),
+        )
+        return []
+
+    work = rules_df.copy()
+    work["__row_order"] = range(len(work))
+    work = work.dropna(subset=[subcategory_col, sheet_col])
+
+    if order_col is not None:
+        work["__sheet_order"] = pd.to_numeric(work[order_col], errors="coerce")
+    else:
+        work["__sheet_order"] = work["__row_order"] + 1
+
+    work = work.sort_values(by=["__sheet_order", "__row_order"], na_position="last")
+
+    rules: list[dict[str, Any]] = []
+    for _, row in work.iterrows():
+        raw_category = str(row[category_col]).strip() if category_col is not None and pd.notna(row[category_col]) else "Text"
+        raw_name = str(row[subcategory_col]).strip()
+        raw_sheet = str(row[sheet_col]).strip()
+        normalized_category = raw_category.upper()
+        clean_name = _normalize_rule_text(raw_name)
+        if not raw_name or not raw_sheet:
+            continue
+
+        rule: dict[str, Any] = {
+            "category": normalized_category,
+            "name": raw_name,
+            "name_clean": clean_name,
+            "sheet_name": raw_sheet,
+        }
+
+        if normalized_category == "AMT":
+            amount_value = _parse_rule_amount(raw_name)
+            if amount_value is None:
+                logger.warning("Skipping Amt rule with invalid amount '%s' for sheet %s", raw_name, raw_sheet)
+                continue
+            rule["amount_value"] = amount_value
+        elif not clean_name:
+            continue
+
+        rules.append(rule)
+
+    logger.info("Loaded %s rule(s) from %s", len(rules), rules_path)
+    return rules
+
+
+def _build_text_rule_sheet(statement_df: pd.DataFrame, rule: dict[str, Any]) -> pd.DataFrame:
+    if statement_df.empty or "Detail_Clean" not in statement_df.columns:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    detail_series = statement_df["Detail_Clean"].fillna("").astype(str).map(compact_detail_key).str.upper()
+    mask = detail_series.str.contains(rule["name_clean"], na=False)
+    matched = statement_df[mask].copy()
+    return _ensure_columns(matched)
+
+
+def _build_amount_rule_sheet(statement_df: pd.DataFrame, rule: dict[str, Any]) -> pd.DataFrame:
+    if statement_df.empty:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    target_amount = float(rule["amount_value"])
+    work = statement_df.copy()
+    work["Debit"] = pd.to_numeric(work["Debit"], errors="coerce")
+    work["Credit"] = pd.to_numeric(work["Credit"], errors="coerce")
+
+    debit_match = work["Debit"].notna() & (work["Debit"].sub(target_amount).abs() <= 0.005)
+    credit_match = work["Credit"].notna() & (work["Credit"].sub(target_amount).abs() <= 0.005)
+    matched = work[debit_match | credit_match].copy()
+    if matched.empty:
+        return _ensure_columns(matched)
+
+    matched["__amt_group"] = 1
+    matched.loc[credit_match.reindex(matched.index, fill_value=False), "__amt_group"] = 2
+    matched["__sort_date"] = matched["Date"].apply(
+        lambda value: _coerce_excel_date(value) or datetime.max
+    )
+    matched = matched.sort_values(
+        by=["__amt_group", "__sort_date", "Sno"],
+        ascending=[True, True, True],
+        na_position="last",
+    )
+    matched = matched.drop(columns=["__amt_group", "__sort_date"])
+    return _ensure_columns(matched)
+
+
+def _merge_rule_sheet_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    if not frames:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    merged = pd.concat(frames, axis=0, ignore_index=False)
+    if merged.empty:
+        return _ensure_columns(merged)
+
+    if "Sno" in merged.columns:
+        merged["__rule_sno"] = pd.to_numeric(merged["Sno"], errors="coerce")
+        if merged["__rule_sno"].notna().any():
+            merged = merged.sort_values(by=["__rule_sno"], kind="stable", na_position="last")
+            merged = merged.drop_duplicates(subset=["__rule_sno"], keep="first")
+            merged = merged.drop(columns=["__rule_sno"])
+            return _ensure_columns(merged)
+        merged = merged.drop(columns=["__rule_sno"])
+
+    merged = merged.drop_duplicates(keep="first")
+    return _ensure_columns(merged)
+
+
+def _build_rule_sheets(statement_df: pd.DataFrame, rules: list[dict[str, Any]], logger):
+    if statement_df.empty:
+        return []
+
+    sheet_order: list[str] = []
+    grouped_sheet_names: dict[str, str] = {}
+    grouped_frames: dict[str, list[pd.DataFrame]] = {}
+    grouped_rule_names: dict[str, list[str]] = {}
+
+    for rule in rules:
+        category = rule.get("category", "TEXT")
+        if category == "AMT":
+            matched = _build_amount_rule_sheet(statement_df, rule)
+        else:
+            matched = _build_text_rule_sheet(statement_df, rule)
+
+        if matched.empty:
+            continue
+        logger.info("Rule matched: category=%s key=%s rows=%s sheet=%s", category, rule["name"], len(matched), rule["sheet_name"])
+
+        sheet_name = str(rule["sheet_name"]).strip()
+        sheet_key = sheet_name.casefold()
+        if sheet_key not in grouped_frames:
+            sheet_order.append(sheet_key)
+            grouped_sheet_names[sheet_key] = sheet_name
+            grouped_frames[sheet_key] = []
+            grouped_rule_names[sheet_key] = []
+
+        grouped_frames[sheet_key].append(_ensure_columns(matched))
+        grouped_rule_names[sheet_key].append(str(rule["name"]))
+
+    sheets: list[tuple[str, pd.DataFrame]] = []
+    for sheet_key in sheet_order:
+        requested_name = grouped_sheet_names[sheet_key]
+        merged = _merge_rule_sheet_frames(grouped_frames[sheet_key])
+        if merged.empty:
+            continue
+        logger.info(
+            "Merged %s rule(s) into sheet=%s rows=%s keys=%s",
+            len(grouped_rule_names[sheet_key]),
+            requested_name,
+            len(merged),
+            grouped_rule_names[sheet_key],
+        )
+        sheets.append((requested_name, merged))
+
+    return sheets
+
+
+def _to_numeric(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series([pd.NA] * len(frame), index=frame.index)
+    return pd.to_numeric(frame[column], errors="coerce")
+
+
+def _build_cheque_sheet(statement_df: pd.DataFrame) -> pd.DataFrame:
+    if statement_df.empty:
+        return _ensure_columns(statement_df)
+
+    work = statement_df.copy()
+    cheque_series = work["Cheque No"].fillna("").astype(str).str.strip()
+    work = work[cheque_series != ""].copy()
+    if work.empty:
+        return _ensure_columns(work)
+
+    def cheque_sort_key(value: Any) -> tuple[int, str]:
+        text = str(value).strip()
+        digits = re.sub(r"\D", "", text)
+        if digits:
+            return int(digits), text
+        return 10**12, text
+
+    work["__cheque_sort"] = work["Cheque No"].apply(cheque_sort_key)
+    work = work.sort_values(by=["__cheque_sort", "Cheque No"]) 
+    work = work.drop(columns=["__cheque_sort"])
+    return _ensure_columns(work)
+
+
+def _is_return_reject_detail(value: Any) -> bool:
+    normalized = compact_detail_key(value).upper()
+    if not normalized:
+        return False
+
+    if any(marker in normalized for marker in DIRECT_RETURN_REJECT_MARKERS):
+        return True
+    if any(marker in normalized for marker in RETURN_RELATED_CHARGE_MARKERS):
+        return True
+    if "RETURN" in normalized and any(marker in normalized for marker in ELECTRONIC_RETURN_MARKERS):
+        return True
+    return False
+
+
+def _build_return_reject_sheet(statement_df: pd.DataFrame) -> pd.DataFrame:
+    if statement_df.empty:
+        return _ensure_columns(statement_df)
+
+    work = statement_df.copy()
+    detail_series = work["Details"] if "Details" in work.columns else pd.Series([""] * len(work), index=work.index)
+    mask = detail_series.fillna("").astype(str).map(_is_return_reject_detail)
+    work = work[mask].copy()
+    return _ensure_columns(work)
+
+
+def _build_repeat_sheet(statement_df: pd.DataFrame, amount_column: str) -> pd.DataFrame:
+    if statement_df.empty:
+        return _ensure_columns(statement_df)
+
+    work = statement_df.copy()
+    numeric = _to_numeric(work, amount_column)
+    work[amount_column] = numeric
+    work = work[work[amount_column].notna() & (work[amount_column] > 0)].copy()
+    if work.empty:
+        return _ensure_columns(work)
+
+    freq = work.groupby(amount_column)[amount_column].transform("size")
+    work = work[freq > 2].copy()
+    if work.empty:
+        return _ensure_columns(work)
+
+    work = work.sort_values(by=[amount_column, "Sno"], ascending=[False, True])
+    return _ensure_columns(work)
+
+
+def _build_top_sheet(statement_df: pd.DataFrame, amount_column: str, top_n: int = 30) -> pd.DataFrame:
+    if statement_df.empty:
+        return _ensure_columns(statement_df)
+
+    work = statement_df.copy()
+    numeric = _to_numeric(work, amount_column)
+    work[amount_column] = numeric
+    work = work[work[amount_column].notna() & (work[amount_column] > 0)].copy()
+    if work.empty:
+        return _ensure_columns(work)
+
+    work = work.sort_values(by=[amount_column, "Sno"], ascending=[False, True]).head(top_n)
+    return _ensure_columns(work)
+
+
+def _build_month_dr_cr_sheet(statement_df: pd.DataFrame) -> pd.DataFrame:
+    columns = ["Yr-Month", "Dr", "Cr", "Net", "EOM Balance", "#.Of.Dr", "#.Of.Cr", "Avg.Dr", "Avg.Cr"]
+    if statement_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    work = statement_df.copy()
+    work["__month_date"] = work["Date"].apply(_coerce_excel_date)
+    work = work[work["__month_date"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+
+    work["Debit"] = pd.to_numeric(work["Debit"], errors="coerce").fillna(0.0)
+    work["Credit"] = pd.to_numeric(work["Credit"], errors="coerce").fillna(0.0)
+    work["Balance"] = pd.to_numeric(work["Balance"], errors="coerce")
+    work["Sno"] = pd.to_numeric(work["Sno"], errors="coerce")
+    work["__month_key"] = work["__month_date"].map(lambda value: datetime(value.year, value.month, 1))
+    threshold = 30.0
+
+    rows: list[dict[str, Any]] = []
+    grouped = work.groupby("__month_key", sort=True)
+    for month_key, month_frame in grouped:
+        debit_value = round(float(month_frame["Debit"].sum()), 2)
+        credit_value = round(float(month_frame["Credit"].sum()), 2)
+        month_frame = month_frame.sort_values(by=["__month_date", "Sno"], ascending=[True, True], na_position="last")
+        month_end_balance = month_frame["Balance"].dropna()
+        debit_over_threshold = month_frame.loc[month_frame["Debit"] > threshold, "Debit"]
+        credit_over_threshold = month_frame.loc[month_frame["Credit"] > threshold, "Credit"]
+        rows.append(
+            {
+                "Yr-Month": month_key.strftime("%y-%b"),
+                "Dr": debit_value,
+                "Cr": credit_value,
+                "Net": round(credit_value - debit_value, 2),
+                "EOM Balance": round(float(month_end_balance.iloc[-1]), 2) if not month_end_balance.empty else None,
+                "#.Of.Dr": int(debit_over_threshold.count()),
+                "#.Of.Cr": int(credit_over_threshold.count()),
+                "Avg.Dr": round(float(debit_over_threshold.mean()), 2) if not debit_over_threshold.empty else 0.0,
+                "Avg.Cr": round(float(credit_over_threshold.mean()), 2) if not credit_over_threshold.empty else 0.0,
+            }
+        )
+
+    total_debit = round(float(work["Debit"].sum()), 2)
+    total_credit = round(float(work["Credit"].sum()), 2)
+    total_debit_over_threshold = work.loc[work["Debit"] > threshold, "Debit"]
+    total_credit_over_threshold = work.loc[work["Credit"] > threshold, "Credit"]
+    rows.append(
+        {
+            "Yr-Month": "Total",
+            "Dr": total_debit,
+            "Cr": total_credit,
+            "Net": round(total_credit - total_debit, 2),
+            "EOM Balance": "",
+            "#.Of.Dr": int(total_debit_over_threshold.count()),
+            "#.Of.Cr": int(total_credit_over_threshold.count()),
+            "Avg.Dr": round(float(total_debit_over_threshold.mean()), 2) if not total_debit_over_threshold.empty else 0.0,
+            "Avg.Cr": round(float(total_credit_over_threshold.mean()), 2) if not total_credit_over_threshold.empty else 0.0,
+        }
+    )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _apply_base_style(workbook) -> None:
+    left_headers = {"date", "detail", "details", "detailclean", "cheque", "chequeno", "source"}
+    center_headers = {"sno"}
+    right_headers = {"debit", "credit", "balance"}
+    date_headers = {"date", "txndate", "valuedate"}
+    text_headers = {"cheque", "chequeno"}
+
+    for ws in workbook.worksheets:
+        if ws.title.lower() == "month_dr_cr":
+            continue
+
+        max_row = ws.max_row
+        max_col = ws.max_column
+
+        if max_row < 1 or max_col < 1:
+            continue
+
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+
+        header_to_col: dict[str, int] = {}
+        for col_idx in range(1, max_col + 1):
+            header_value = ws.cell(row=1, column=col_idx).value
+            header_to_col[_normalize_header(header_value)] = col_idx
+
+        align_by_col: dict[int, Alignment] = {}
+        for normalized_header, col_idx in header_to_col.items():
+            if normalized_header in left_headers:
+                align_by_col[col_idx] = ALIGN_LEFT
+            elif normalized_header in right_headers:
+                align_by_col[col_idx] = ALIGN_RIGHT
+            elif normalized_header in center_headers:
+                align_by_col[col_idx] = ALIGN_CENTER
+            else:
+                align_by_col[col_idx] = ALIGN_CENTER
+
+        numeric_cols = {
+            col_idx
+            for normalized_header, col_idx in header_to_col.items()
+            if normalized_header in right_headers
+        }
+        date_cols = {
+            col_idx
+            for normalized_header, col_idx in header_to_col.items()
+            if normalized_header in date_headers
+        }
+        text_cols = {
+            col_idx
+            for normalized_header, col_idx in header_to_col.items()
+            if normalized_header in text_headers
+        }
+
+        for col_idx in range(1, max_col + 1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.font = FONT_HEADER
+            cell.alignment = ALIGN_CENTER
+            cell.fill = HEADER_FILL
+
+        for row_idx in range(2, max_row + 1):
+            fill = ALT_ROW_FILLS[(row_idx - 2) % 2]
+            for col_idx in range(1, max_col + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.font = FONT_NORMAL
+                cell.alignment = align_by_col.get(col_idx, ALIGN_CENTER)
+                if col_idx in numeric_cols:
+                    cell.number_format = INDIAN_NUMBER_FORMAT
+                if col_idx in date_cols:
+                    parsed_date = _coerce_excel_date(cell.value)
+                    if parsed_date is not None:
+                        cell.value = parsed_date
+                    cell.number_format = DATE_NUMBER_FORMAT
+                if col_idx in text_cols and cell.value not in (None, ""):
+                    cell.value = str(cell.value)
+                    cell.number_format = "@"
+                cell.fill = fill
+
+        for col in ws.columns:
+            max_len = 0
+            col_letter = col[0].column_letter
+            for cell in col[: min(len(col), 400)]:
+                value = "" if cell.value is None else str(cell.value)
+                if len(value) > max_len:
+                    max_len = len(value)
+            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 48)
+
+        for col_idx in numeric_cols:
+            col_letter = ws.cell(row=1, column=col_idx).column_letter
+            ws.column_dimensions[col_letter].width = AMOUNT_COLUMN_WIDTH
+
+
+def _apply_month_dr_cr_style(workbook, sheet_name: str) -> None:
+    if sheet_name not in workbook.sheetnames:
+        return
+
+    ws = workbook[sheet_name]
+    if ws.max_row < 1 or ws.max_column < 1:
+        return
+
+    data_max_row = ws.max_row
+    data_max_col = ws.max_column
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.cell(row=1, column=1).coordinate + ":" + ws.cell(row=data_max_row, column=data_max_col).coordinate
+
+    for row_idx in range(1, data_max_row + 1):
+        row_label = str(ws.cell(row=row_idx, column=1).value or "").strip()
+        is_total_row = row_label.lower() == "total"
+        for col_idx in range(1, data_max_col + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.font = FONT_NORMAL
+            cell.border = THIN_BORDER
+
+            if row_idx == 1:
+                cell.font = FONT_HEADER
+                cell.alignment = ALIGN_LEFT if col_idx == 1 else ALIGN_CENTER
+            elif col_idx == 1:
+                cell.font = FONT_HEADER
+                cell.alignment = ALIGN_LEFT
+                cell.fill = MONTH_LABEL_FILL
+            else:
+                header_value = str(ws.cell(row=1, column=col_idx).value or "").strip()
+                if is_total_row:
+                    cell.font = FONT_HEADER
+                cell.alignment = ALIGN_RIGHT
+                if isinstance(cell.value, (int, float)):
+                    if header_value in {"#.Of.Dr", "#.Of.Cr"}:
+                        cell.number_format = INDIAN_NUMBER_FORMAT_NO_DECIMAL
+                    elif header_value in {"EOM Balance", "Avg.Dr", "Avg.Cr"}:
+                        cell.number_format = INDIAN_NUMBER_FORMAT
+                    else:
+                        cell.number_format = INDIAN_NUMBER_FORMAT_NO_DECIMAL
+                cell.fill = MONTH_VALUE_ROW_FILLS[(row_idx - 2) % len(MONTH_VALUE_ROW_FILLS)]
+
+    ws.column_dimensions["A"].width = 14
+    width_map = {
+        "Dr": 14,
+        "Cr": 14,
+        "Net": 14,
+        "EOM Balance": 16,
+        "#.Of.Dr": 10,
+        "#.Of.Cr": 10,
+        "Avg.Dr": 14,
+        "Avg.Cr": 14,
+    }
+    for col_idx in range(2, data_max_col + 1):
+        header_value = str(ws.cell(row=1, column=col_idx).value or "").strip()
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width_map.get(header_value, 14)
+
+    footnote_row = data_max_row + 2
+    ws.merge_cells(start_row=footnote_row, start_column=1, end_row=footnote_row, end_column=data_max_col)
+    footnote_cell = ws.cell(row=footnote_row, column=1)
+    footnote_cell.value = MONTH_DR_CR_FOOTNOTE
+    footnote_cell.font = FONT_FOOTNOTE
+    footnote_cell.alignment = ALIGN_LEFT
+
+
+def _apply_repeat_group_colors(workbook, sheet_name: str, amount_column: str) -> None:
+    if sheet_name not in workbook.sheetnames:
+        return
+
+    ws = workbook[sheet_name]
+    if ws.max_row <= 1:
+        return
+
+    header_to_col: dict[str, int] = {}
+    for col_idx in range(1, ws.max_column + 1):
+        value = ws.cell(row=1, column=col_idx).value
+        header_to_col[str(value).strip()] = col_idx
+
+    amount_col_idx = header_to_col.get(amount_column)
+    if amount_col_idx is None:
+        return
+
+    color_map: dict[str, PatternFill] = {}
+    color_index = 0
+
+    for row_idx in range(2, ws.max_row + 1):
+        raw_value = ws.cell(row=row_idx, column=amount_col_idx).value
+        if raw_value in (None, ""):
+            continue
+
+        try:
+            key = f"{float(raw_value):.2f}"
+        except (TypeError, ValueError):
+            key = str(raw_value)
+
+        if key not in color_map:
+            color_map[key] = REPEAT_GROUP_FILLS[color_index % len(REPEAT_GROUP_FILLS)]
+            color_index += 1
+
+        fill = color_map[key]
+        for col_idx in range(1, ws.max_column + 1):
+            ws.cell(row=row_idx, column=col_idx).fill = fill
+
+
+def _force_leading_equals_to_text(workbook) -> None:
+    for ws in workbook.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    cell.data_type = "s"
+
+
+def _next_final_path(output_dir: Path, pdf_stem: str) -> Path:
+    target = output_dir / f"{pdf_stem}.xlsx"
+    if target.exists():
+        timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+        return output_dir / f"{pdf_stem}_{timestamp}.xlsx"
+    return target
+
+
+def build_final_workbook(
+    statement_df: pd.DataFrame,
+    rules_path: Path,
+    output_dir: Path,
+    pdf_stem: str,
+    logger,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    statement_df = _ensure_columns(statement_df)
+
+    rules = _load_rules(rules_path, logger)
+    rule_sheets = _build_rule_sheets(statement_df, rules, logger)
+
+    return_reject_df = _build_return_reject_sheet(statement_df)
+    cheque_df = _build_cheque_sheet(statement_df)
+    repeat_credit_df = _build_repeat_sheet(statement_df, "Credit")
+    repeat_debit_df = _build_repeat_sheet(statement_df, "Debit")
+    top30_debit_df = _build_top_sheet(statement_df, "Debit", top_n=30)
+    top30_credit_df = _build_top_sheet(statement_df, "Credit", top_n=30)
+    month_dr_cr_df = _build_month_dr_cr_sheet(statement_df)
+
+    planned_sheets: list[tuple[str, pd.DataFrame]] = [
+        ("Statement", statement_df),
+        ("Ret/Rej", return_reject_df),
+    ]
+    planned_sheets.extend(rule_sheets)
+    planned_sheets.extend(
+        [
+            ("Cheque_Transactions", cheque_df),
+            ("Repeat_Credit_Amount", repeat_credit_df),
+            ("Repeat_Debit_Amount", repeat_debit_df),
+            ("Top30_Debit", top30_debit_df),
+            ("Top30_Credit", top30_credit_df),
+            ("month_dr_cr", month_dr_cr_df),
+        ]
+    )
+
+    final_path = _next_final_path(output_dir, pdf_stem)
+
+    used_names: set[str] = set()
+    normalized_sheet_names: dict[str, str] = {}
+
+    with pd.ExcelWriter(final_path, engine="openpyxl") as writer:
+        for requested_name, frame in planned_sheets:
+            safe_name = _unique_sheet_name(requested_name, used_names)
+            normalized_sheet_names[requested_name] = safe_name
+            if requested_name == "month_dr_cr":
+                frame.to_excel(writer, sheet_name=safe_name, index=False)
+            else:
+                _ensure_columns(frame).to_excel(writer, sheet_name=safe_name, index=False)
+
+    workbook = load_workbook(final_path)
+    _apply_base_style(workbook)
+    _apply_repeat_group_colors(
+        workbook,
+        normalized_sheet_names.get("Repeat_Credit_Amount", "Repeat_Credit_Amount"),
+        "Credit",
+    )
+    _apply_repeat_group_colors(
+        workbook,
+        normalized_sheet_names.get("Repeat_Debit_Amount", "Repeat_Debit_Amount"),
+        "Debit",
+    )
+    _apply_month_dr_cr_style(
+        workbook,
+        normalized_sheet_names.get("month_dr_cr", "month_dr_cr"),
+    )
+    _force_leading_equals_to_text(workbook)
+    workbook.save(final_path)
+
+    logger.info("Final workbook created: %s", final_path)
+    return final_path

@@ -1,0 +1,551 @@
+from __future__ import annotations
+
+import os
+import re
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import fitz
+import pytesseract
+from PIL import Image
+
+from parser_helpers import build_record
+from utils import clean_cell, parse_amount
+
+RENDER_ZOOM = 2.0
+OCR_ROW_RE = re.compile(
+    r"^(?P<date>\d{2}-\d{2}-\d{4})\s+"
+    r"(?P<time>\d{2}:\d{2}:\d{2})\s+"
+    r"(?P<value_date>\d{2}-\d{2}-\d{4})\s+"
+    r"(?P<body>.+?)\s+"
+    r"(?P<amount>[0-9,]+\.\d{2})\s+"
+    r"(?P<balance>-?[0-9,]+\.\d{2}[\]\)\}]?)$"
+)
+OPENING_BALANCE_RE = re.compile(r"Opening Balance.*?(-?[0-9,]+\.\d{2})")
+OCR_DATE_FORMATS = ("%d-%m-%Y",)
+TEXT_DATE_FORMATS = ("%d/%m/%y",)
+TEXT_ROW_RE = re.compile(
+    r"^(?P<date>\d{2}/\d{2}/\d{2})\s+"
+    r"(?P<value_date>\d{2}/\d{2}/\d{2})\s*"
+    r"(?P<rest>.*)$"
+)
+TEXT_AMOUNT_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{2,3})*|\d+)?\.\d{2}")
+TEXT_DETECTION_MIN_ROWS = 3
+TOKENIZED_TEXT_ROW_START_RE = re.compile(r"^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}$")
+TOKENIZED_TEXT_DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{4}$")
+TOKENIZED_TEXT_AMOUNT_RE = re.compile(r"^-?[0-9,]+\.\d{2}$")
+OCR_FOOTER_PREFIXES = ("Page No.",)
+OCR_HEADER_PREFIXES = (
+    "Account Statement",
+    "as of ",
+    "Account Name ",
+    "Account Holder(s) Name",
+    "Account Number ",
+    "Branch ",
+    "Customer Id ",
+    "Account Currency ",
+    "Opening Balance ",
+    "Closing Balance ",
+    "Searched by ",
+    "From Date ",
+    "To Date ",
+    "Transaction Date Value Date",
+)
+CREDIT_HINTS = (
+    "CASH DEP",
+    "DEPOSIT",
+    "NEFT CR",
+    "RTGS CR",
+    "BY CLG",
+    "CR-",
+    "CREDIT",
+    "REVERSAL",
+    "B/F",
+)
+DEBIT_HINTS = (
+    "CHQ PAID",
+    "WITHDRAWL",
+    "WITHDRAWAL",
+    "CHARGES",
+    "SMS CHARGES",
+    "BILLDESK",
+    "DEBIT",
+    "IMPS-",
+    "SBIEPAY",
+    "TO DESIGN",
+    "TO DESIG",
+    "TR TO ",
+    "FT - DR",
+    "FT -100",
+)
+
+
+@dataclass
+class PendingRecord:
+    date_text: str
+    body_text: str
+    amount_text: str
+    balance_text: str
+    continuation_lines: list[str] = field(default_factory=list)
+    cheque_no: str = ""
+
+
+def _configure_tesseract() -> str:
+    candidates: list[Path] = []
+
+    env_value = os.environ.get("TESSERACT_CMD")
+    if env_value:
+        candidates.append(Path(env_value))
+
+    resolved = shutil.which("tesseract")
+    if resolved:
+        candidates.append(Path(resolved))
+
+    candidates.extend(
+        [
+            Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+            Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate.is_file():
+            pytesseract.pytesseract.tesseract_cmd = str(candidate)
+            return str(candidate)
+
+    raise FileNotFoundError(
+        "Tesseract executable not found. Install Tesseract OCR or set TESSERACT_CMD to the full path."
+    )
+
+
+def _render_page_text(page: fitz.Page) -> str:
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(RENDER_ZOOM, RENDER_ZOOM), alpha=False)
+    image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+    return pytesseract.image_to_string(image, config="--psm 6")
+
+
+def _clean_ocr_line(raw_line: str) -> str:
+    return clean_cell(raw_line)
+
+def _should_skip_ocr_line(line: str) -> bool:
+    if not line:
+        return True
+    if any(line.startswith(prefix) for prefix in OCR_FOOTER_PREFIXES):
+        return True
+    return any(line.startswith(prefix) for prefix in OCR_HEADER_PREFIXES)
+
+
+def _split_ocr_body(body_text: str) -> tuple[str, str]:
+    text = clean_cell(body_text).replace("|", " ")
+    parts = [part for part in text.split() if part]
+    if parts and parts[0].isdigit() and len(parts[0]) == 4:
+        parts.pop(0)
+
+    cheque_no = ""
+    if parts and re.fullmatch(r"[0-9$]{3,}", parts[0]):
+        cheque_no = parts.pop(0)
+
+    return clean_cell(" ".join(parts)), cheque_no
+
+
+def _classify_amount(
+    details: str,
+    amount_value: float,
+    balance_value: float,
+    previous_balance: float | None,
+) -> tuple[float | None, float | None]:
+    if previous_balance is not None:
+        if abs((previous_balance + amount_value) - balance_value) <= 1.0:
+            return None, amount_value
+        if abs((previous_balance - amount_value) - balance_value) <= 1.0:
+            return amount_value, None
+
+    upper_details = details.upper()
+    if any(token in upper_details for token in CREDIT_HINTS) and not any(
+        token in upper_details for token in DEBIT_HINTS
+    ):
+        return None, amount_value
+    return amount_value, None
+
+
+def _finalize_record(
+    pending: PendingRecord,
+    previous_balance: float | None,
+    date_formats: tuple[str, ...],
+) -> tuple[dict[str, Any], float | None]:
+    details_text = clean_cell(" ".join([pending.body_text, *pending.continuation_lines]))
+    amount_value = parse_amount(pending.amount_text)
+    balance_value = parse_amount(pending.balance_text)
+
+    debit: float | None = None
+    credit: float | None = None
+    if amount_value is not None and balance_value is not None:
+        debit, credit = _classify_amount(details_text, amount_value, balance_value, previous_balance)
+
+    record = build_record(
+        date_text=pending.date_text,
+        details=details_text,
+        cheque_no=pending.cheque_no,
+        debit=debit,
+        credit=credit,
+        balance=balance_value,
+        date_formats=date_formats,
+    )
+    next_balance = balance_value if balance_value is not None else previous_balance
+    return record, next_balance
+
+
+def _parse_ocr_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
+    tesseract_cmd = _configure_tesseract()
+    logger.info("Parsing KVB statement with OCR layout: %s | tesseract=%s", pdf_path, tesseract_cmd)
+
+    records: list[dict[str, Any]] = []
+    previous_balance: float | None = None
+    pending: PendingRecord | None = None
+
+    with fitz.open(pdf_path) as pdf:
+        for page_idx, page in enumerate(pdf, start=1):
+            text = _render_page_text(page)
+            lines = text.splitlines()
+            logger.debug("Page %s: OCR extracted %s line(s)", page_idx, len(lines))
+
+            for raw_line in lines:
+                line = _clean_ocr_line(raw_line)
+                if not line:
+                    continue
+
+                opening_match = OPENING_BALANCE_RE.search(line)
+                if opening_match and previous_balance is None:
+                    previous_balance = parse_amount(opening_match.group(1))
+                    continue
+
+                if _should_skip_ocr_line(line):
+                    continue
+
+                match = OCR_ROW_RE.match(line)
+                if match:
+                    if pending is not None:
+                        record, previous_balance = _finalize_record(pending, previous_balance, OCR_DATE_FORMATS)
+                        records.append(record)
+                        if progress_cb is not None:
+                            progress_cb(len(records))
+
+                    details, cheque_no = _split_ocr_body(match.group("body"))
+                    pending = PendingRecord(
+                        date_text=match.group("date"),
+                        body_text=details,
+                        amount_text=match.group("amount"),
+                        balance_text=match.group("balance"),
+                        cheque_no=cheque_no,
+                    )
+                    continue
+
+                if pending is not None and not _should_skip_ocr_line(line):
+                    pending.continuation_lines.append(line)
+
+    if pending is not None:
+        record, previous_balance = _finalize_record(pending, previous_balance, OCR_DATE_FORMATS)
+        records.append(record)
+        if progress_cb is not None:
+            progress_cb(len(records))
+
+    for index, record in enumerate(records, start=1):
+        record["Sno"] = index
+
+    logger.info("KVB OCR parse complete: rows=%s ending_balance=%s", len(records), previous_balance)
+    return records
+
+
+
+
+def _is_separator_line(line: str) -> bool:
+    return bool(line) and set(line) == {"-"}
+
+
+def _should_skip_text_line(
+    line: str,
+    in_header_block: bool,
+    saw_table_header: bool,
+    in_summary_block: bool,
+) -> tuple[bool, bool, bool, bool]:
+    if not line:
+        return True, in_header_block, saw_table_header, in_summary_block
+
+    if in_summary_block:
+        return True, in_header_block, saw_table_header, in_summary_block
+
+    if line.startswith("Opening Balance"):
+        return True, False, False, True
+
+    if line.startswith("THE KARUR VYSYA BANK LTD."):
+        return True, True, False, False
+
+    if in_header_block:
+        if line.startswith("TXN DT"):
+            return True, True, True, False
+        if saw_table_header and _is_separator_line(line):
+            return True, False, False, False
+        return True, True, saw_table_header, False
+
+
+    if _is_separator_line(line):
+        return True, in_header_block, saw_table_header, in_summary_block
+
+    if line.lower().startswith("page :"):
+        return True, in_header_block, saw_table_header, in_summary_block
+
+    if re.fullmatch(r"Page \d+ of \d+", line, flags=re.IGNORECASE):
+        return True, in_header_block, saw_table_header, in_summary_block
+
+    if re.fullmatch(r"\d{2}/\d{2}/\d{4}", line):
+        return True, in_header_block, saw_table_header, in_summary_block
+
+    if line.startswith("https://"):
+        return True, in_header_block, saw_table_header, in_summary_block
+
+    return False, in_header_block, saw_table_header, in_summary_block
+
+
+
+def _parse_text_row(line: str) -> dict[str, str] | None:
+    match = TEXT_ROW_RE.match(line)
+    if not match:
+        return None
+
+    rest = clean_cell(match.group("rest"))
+    if not rest:
+        return None
+
+    parts = rest.split()
+    if parts and parts[0].isdigit() and len(parts[0]) <= 4:
+        rest = clean_cell(rest[len(parts[0]) :])
+
+    amount_matches = list(TEXT_AMOUNT_RE.finditer(rest))
+    if not amount_matches:
+        return None
+
+    balance_text = amount_matches[-1].group(0)
+    amount_text = amount_matches[-2].group(0) if len(amount_matches) >= 2 else ""
+    body_end = amount_matches[-2].start() if len(amount_matches) >= 2 else amount_matches[-1].start()
+    body_text = clean_cell(rest[:body_end])
+
+
+    cheque_no = ""
+    ref_match = re.search(r"\s+(0|\d{6,})\s*$", body_text)
+    if ref_match:
+        candidate = ref_match.group(1)
+        body_text = clean_cell(body_text[: ref_match.start()])
+        if candidate.strip("0"):
+            cheque_no = candidate
+
+    return {
+        "date_text": match.group("date"),
+        "body_text": body_text,
+        "amount_text": amount_text,
+        "balance_text": balance_text,
+        "cheque_no": cheque_no,
+    }
+
+
+def _detect_text_layout(pdf_path: str) -> bool:
+    row_hits = 0
+    with fitz.open(pdf_path) as pdf:
+        for page_idx, page in enumerate(pdf, start=1):
+            for raw_line in page.get_text("text").splitlines():
+                if TEXT_ROW_RE.match(clean_cell(raw_line)):
+                    row_hits += 1
+                    if row_hits >= TEXT_DETECTION_MIN_ROWS:
+                        return True
+            if page_idx >= 3:
+                break
+    return False
+
+
+def _detect_tokenized_text_layout(pdf_path: str) -> bool:
+    row_hits = 0
+    with fitz.open(pdf_path) as pdf:
+        for page_idx, page in enumerate(pdf, start=1):
+            for raw_line in page.get_text("text").splitlines():
+                if TOKENIZED_TEXT_ROW_START_RE.match(clean_cell(raw_line)):
+                    row_hits += 1
+                    if row_hits >= TEXT_DETECTION_MIN_ROWS:
+                        return True
+            if page_idx >= 3:
+                break
+    return False
+
+
+def _extract_opening_balance_from_text(page_text: str) -> float | None:
+    compact = clean_cell(page_text)
+    match = OPENING_BALANCE_RE.search(compact)
+    if not match:
+        return None
+    return parse_amount(match.group(1))
+
+
+def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
+    if len(row_lines) < 5:
+        return None
+    if not TOKENIZED_TEXT_ROW_START_RE.match(row_lines[0]):
+        return None
+    if not TOKENIZED_TEXT_DATE_RE.match(row_lines[1]):
+        return None
+
+    amount_positions = [
+        idx
+        for idx, value in enumerate(row_lines[2:], start=2)
+        if TOKENIZED_TEXT_AMOUNT_RE.match(value)
+    ]
+    if len(amount_positions) < 2:
+        return None
+
+    amount_idx = amount_positions[-2]
+    balance_idx = amount_positions[-1]
+    if amount_idx >= balance_idx:
+        return None
+
+    amount_text = row_lines[amount_idx]
+    balance_text = row_lines[balance_idx]
+    body_parts = [part for part in row_lines[3:amount_idx] if clean_cell(part)]
+
+    cheque_no = ""
+    if body_parts and re.fullmatch(r"\d{6,}", body_parts[0]):
+        cheque_no = body_parts.pop(0)
+
+    body_text = clean_cell(" ".join(body_parts))
+    return PendingRecord(
+        date_text=row_lines[0].split()[0],
+        body_text=body_text,
+        amount_text=amount_text,
+        balance_text=balance_text,
+        cheque_no=cheque_no,
+    )
+
+
+def _parse_tokenized_text_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
+    logger.info("Parsing KVB statement with tokenized text layout: %s", pdf_path)
+
+    records: list[dict[str, Any]] = []
+    previous_balance: float | None = None
+    current_row_lines: list[str] = []
+
+    def finalize_current_row() -> None:
+        nonlocal current_row_lines, previous_balance
+        if not current_row_lines:
+            return
+
+        parsed = _parse_tokenized_text_row(current_row_lines)
+        current_row_lines = []
+        if parsed is None:
+            return
+
+        record, previous_balance_local = _finalize_record(parsed, previous_balance, OCR_DATE_FORMATS)
+        previous_balance = previous_balance_local
+        records.append(record)
+        if progress_cb is not None:
+            progress_cb(len(records))
+
+    with fitz.open(pdf_path) as pdf:
+        for page_idx, page in enumerate(pdf, start=1):
+            page_text = page.get_text("text")
+            lines = page_text.splitlines()
+            logger.debug("Page %s: tokenized text extracted %s line(s)", page_idx, len(lines))
+
+            if previous_balance is None:
+                opening_balance = _extract_opening_balance_from_text(page_text)
+                if opening_balance is not None:
+                    previous_balance = opening_balance
+
+            for raw_line in lines:
+                line = clean_cell(raw_line)
+                if not line or line.startswith("Page No."):
+                    continue
+
+                if TOKENIZED_TEXT_ROW_START_RE.match(line):
+                    finalize_current_row()
+                    current_row_lines = [line]
+                    continue
+
+                if current_row_lines:
+                    current_row_lines.append(line)
+
+        finalize_current_row()
+
+    for index, record in enumerate(records, start=1):
+        record["Sno"] = index
+
+    logger.info("KVB tokenized text parse complete: rows=%s ending_balance=%s", len(records), previous_balance)
+    return records
+
+
+def _parse_text_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
+    logger.info("Parsing KVB statement with native text layout: %s", pdf_path)
+
+    records: list[dict[str, Any]] = []
+    previous_balance: float | None = None
+    pending: PendingRecord | None = None
+    in_header_block = False
+    saw_table_header = False
+    in_summary_block = False
+
+    with fitz.open(pdf_path) as pdf:
+        for page_idx, page in enumerate(pdf, start=1):
+            lines = page.get_text("text").splitlines()
+            logger.debug("Page %s: native text extracted %s line(s)", page_idx, len(lines))
+
+            for raw_line in lines:
+                line = clean_cell(raw_line)
+                should_skip, in_header_block, saw_table_header, in_summary_block = _should_skip_text_line(
+                    line,
+                    in_header_block,
+                    saw_table_header,
+                    in_summary_block,
+                )
+                if should_skip:
+                    continue
+
+                parsed = _parse_text_row(line)
+                if parsed is not None:
+                    if pending is not None:
+                        record, previous_balance = _finalize_record(
+                            pending,
+                            previous_balance,
+                            TEXT_DATE_FORMATS,
+                        )
+                        records.append(record)
+                        if progress_cb is not None:
+                            progress_cb(len(records))
+
+
+                    pending = PendingRecord(**parsed)
+                    continue
+
+                if pending is not None:
+                    pending.continuation_lines.append(line)
+
+    if pending is not None:
+        record, previous_balance = _finalize_record(pending, previous_balance, TEXT_DATE_FORMATS)
+        records.append(record)
+        if progress_cb is not None:
+            progress_cb(len(records))
+
+    for index, record in enumerate(records, start=1):
+        record["Sno"] = index
+
+    logger.info("KVB native text parse complete: rows=%s ending_balance=%s", len(records), previous_balance)
+    return records
+
+
+def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
+    if _detect_tokenized_text_layout(pdf_path):
+        logger.info("Detected tokenized text KVB layout for %s", pdf_path)
+        return _parse_tokenized_text_statement(pdf_path, logger, progress_cb=progress_cb)
+
+    if _detect_text_layout(pdf_path):
+        logger.info("Detected native text KVB layout for %s", pdf_path)
+        return _parse_text_statement(pdf_path, logger, progress_cb=progress_cb)
+
+    logger.info("Detected OCR KVB layout for %s", pdf_path)
+    return _parse_ocr_statement(pdf_path, logger, progress_cb=progress_cb)
