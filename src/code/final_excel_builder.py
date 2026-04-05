@@ -5,6 +5,7 @@ import sys
 import tempfile
 import textwrap
 import zipfile
+from io import BytesIO
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -12,10 +13,9 @@ from xml.etree import ElementTree as ET
 
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.chart import BarChart, Reference
-from openpyxl.chart.label import DataLabelList
-from openpyxl.chart.shapes import GraphicalProperties, LineProperties
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from PIL import Image as PILImage, ImageDraw, ImageFont
 
 from utils import OUTPUT_COLUMNS, clean_detail, compact_detail_key, sanitize_cheque_column
 
@@ -52,6 +52,7 @@ THIN_BORDER = Border(
     bottom=Side(style="thin", color="BFBFBF"),
 )
 MONTH_DR_CR_FOOTNOTE = "#.OF Dr/Cr & Avg takes only amount Greater than 30. Less than 30 not counted."
+MONTH_DR_CR_CHART_IMAGE_SIZE = (1120, 520)
 C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -677,52 +678,7 @@ def _apply_month_dr_cr_style(workbook, sheet_name: str) -> None:
             chart_data_end_row -= 1
 
     if chart_data_end_row >= 2:
-        chart = BarChart()
-        chart.type = "col"
-        chart.style = 10
-        chart.grouping = "clustered"
-        chart.overlap = 0
-        chart.gapWidth = 70
-        chart.title = None
-        chart.y_axis.title = None
-        chart.x_axis.title = None
-        chart.x_axis.axPos = "b"
-        chart.y_axis.axPos = "l"
-        chart.x_axis.tickLblPos = "low"
-        chart.y_axis.tickLblPos = "none"
-        chart.x_axis.delete = False
-        chart.y_axis.delete = False
-        chart.legend.position = "r"
-        chart.height = 10.5
-        chart.width = 20
-        chart.y_axis.majorGridlines.spPr = GraphicalProperties(
-            ln=LineProperties(
-                solidFill="D9D9D9",
-                prstDash="sysDot",
-                w=12700,
-            )
-        )
-
-        data = Reference(ws, min_col=2, max_col=3, min_row=1, max_row=chart_data_end_row)
-        categories = Reference(ws, min_col=1, min_row=2, max_row=chart_data_end_row)
-        chart.add_data(data, titles_from_data=True)
-        chart.set_categories(categories)
-
-        chart.dLbls = DataLabelList()
-        chart.dLbls.showVal = True
-        chart.dLbls.showCatName = False
-        chart.dLbls.showSerName = False
-        chart.dLbls.showLegendKey = False
-        chart.dLbls.dLblPos = "outEnd"
-        chart.dLbls.numFmt = "#,##,##0"
-
-        series_colors = ("4F81BD", "ED7D31")
-        for series, color in zip(chart.ser, series_colors):
-            series.graphicalProperties.solidFill = color
-            series.graphicalProperties.line.solidFill = color
-
-        chart_row = footnote_row + 5
-        ws.add_chart(chart, f"A{chart_row}")
+        _add_month_dr_cr_chart_image(ws, chart_data_end_row, footnote_row)
 
 
 def _format_month_dr_cr_chart_label(value: Any) -> str:
@@ -740,6 +696,231 @@ def _format_month_dr_cr_chart_label(value: Any) -> str:
     if absolute >= 1000:
         return f"{numeric / 1000:.1f}k"
     return f"{numeric:.1f}"
+
+
+def _load_chart_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    font_names = ["arialbd.ttf", "calibrib.ttf", "arial.ttf", "calibri.ttf"] if bold else [
+        "arial.ttf",
+        "calibri.ttf",
+    ]
+    for font_name in font_names:
+        try:
+            return ImageFont.truetype(font_name, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _draw_dotted_horizontal_line(draw: ImageDraw.ImageDraw, x1: int, x2: int, y: int, fill: str) -> None:
+    dash_length = 4
+    gap_length = 6
+    x = x1
+    while x < x2:
+        draw.line((x, y, min(x + dash_length, x2), y), fill=fill, width=1)
+        x += dash_length + gap_length
+
+
+def _format_month_dr_cr_axis_label(value: float) -> str:
+    return f"\u20B9{_format_month_dr_cr_chart_label(value)}"
+
+
+def _nice_axis_step(max_value: float, tick_count: int = 8) -> float:
+    if max_value <= 0:
+        return 1.0
+
+    rough_step = max_value / max(tick_count, 1)
+    exponent = int(f"{rough_step:e}".split("e")[1])
+    magnitude = 10 ** exponent
+    fraction = rough_step / magnitude
+
+    if fraction <= 1:
+        nice_fraction = 1
+    elif fraction <= 2:
+        nice_fraction = 2
+    elif fraction <= 5:
+        nice_fraction = 5
+    else:
+        nice_fraction = 10
+
+    return nice_fraction * magnitude
+
+
+def _draw_rotated_text(
+    image: PILImage.Image,
+    text: str,
+    position: tuple[int, int],
+    font,
+    fill: str,
+    angle: float,
+) -> None:
+    if not text:
+        return
+
+    measure_draw = ImageDraw.Draw(PILImage.new("RGBA", (1, 1), (0, 0, 0, 0)))
+    bbox = measure_draw.textbbox((0, 0), text, font=font)
+    text_width = max(1, bbox[2] - bbox[0])
+    text_height = max(1, bbox[3] - bbox[1])
+    text_layer = PILImage.new("RGBA", (text_width + 8, text_height + 8), (0, 0, 0, 0))
+    text_draw = ImageDraw.Draw(text_layer)
+    text_draw.text((4, 4), text, font=font, fill=fill)
+    rotated = text_layer.rotate(angle, expand=True, resample=PILImage.Resampling.BICUBIC)
+    image.alpha_composite(rotated, dest=position)
+
+
+def _add_month_dr_cr_chart_image(ws, chart_data_end_row: int, footnote_row: int) -> None:
+    month_values: list[tuple[str, float, float]] = []
+    for row_idx in range(2, chart_data_end_row + 1):
+        month_label = str(ws.cell(row=row_idx, column=1).value or "").strip()
+        if not month_label:
+            continue
+        try:
+            debit = float(ws.cell(row=row_idx, column=2).value or 0)
+            credit = float(ws.cell(row=row_idx, column=3).value or 0)
+        except (TypeError, ValueError):
+            continue
+        month_values.append((month_label, debit, credit))
+
+    if not month_values:
+        return
+
+    width, height = MONTH_DR_CR_CHART_IMAGE_SIZE
+    image = PILImage.new("RGBA", (width, height), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(image)
+
+    panel_margin = 12
+    panel_radius = 26
+    shadow_offset = 8
+    shadow_color = (0, 0, 0, 48)
+    panel_fill = "#272624"
+    panel_border = "#4A4744"
+    grid_color = "#403D39"
+    axis_text_color = "#8F8B86"
+    label_text_color = "#BFBAB3"
+    value_text_color = "#D9D5CF"
+    bar_colors = {"Dr": "#355C91", "Cr": "#B0572D"}
+
+    draw.rounded_rectangle(
+        (
+            panel_margin + shadow_offset,
+            panel_margin + shadow_offset,
+            width - panel_margin + shadow_offset,
+            height - panel_margin + shadow_offset,
+        ),
+        radius=panel_radius,
+        fill=shadow_color,
+    )
+    draw.rounded_rectangle(
+        (panel_margin, panel_margin, width - panel_margin, height - panel_margin),
+        radius=panel_radius,
+        fill=panel_fill,
+        outline=panel_border,
+        width=2,
+    )
+
+    font_regular = _load_chart_font(17)
+    font_small = _load_chart_font(14)
+    font_label = _load_chart_font(15)
+    font_bold = _load_chart_font(17, bold=True)
+
+    left_margin = panel_margin + 78
+    right_margin = panel_margin + 34
+    top_margin = panel_margin + 92
+    bottom_margin = panel_margin + 78
+    plot_left = left_margin
+    plot_top = top_margin
+    plot_right = width - right_margin
+    plot_bottom = height - bottom_margin
+    plot_width = plot_right - plot_left
+    plot_height = plot_bottom - plot_top
+
+    max_value = max(max(debit, credit) for _, debit, credit in month_values)
+    if max_value <= 0:
+        max_value = 1.0
+    axis_step = _nice_axis_step(max_value, tick_count=8)
+    axis_max = axis_step * max(1, int((max_value + axis_step - 1) // axis_step))
+
+    def value_to_y(value: float) -> int:
+        scaled = value / axis_max
+        return round(plot_bottom - (plot_height * scaled))
+
+    tick_value = 0.0
+    while tick_value <= axis_max + (axis_step / 2):
+        y = value_to_y(tick_value)
+        _draw_dotted_horizontal_line(draw, plot_left, plot_right, y, grid_color)
+        tick_value += axis_step
+
+    group_width = plot_width / max(len(month_values), 1)
+    bar_width = max(16, min(34, int(group_width * 0.30)))
+    series_gap = max(8, int(bar_width * 0.28))
+
+    def draw_centered_text(text: str, center_x: int, top_y: int, font, fill: str) -> None:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        draw.text((center_x - text_width / 2, top_y), text, font=font, fill=fill)
+
+    label_offsets = {"Dr": -12, "Cr": 10}
+
+    for index, (month_label, debit, credit) in enumerate(month_values):
+        group_center = plot_left + group_width * (index + 0.5)
+
+        dr_left = round(group_center - series_gap / 2 - bar_width)
+        dr_right = dr_left + bar_width
+        dr_top = value_to_y(debit)
+        draw.rounded_rectangle((dr_left, dr_top, dr_right, plot_bottom), radius=7, fill=bar_colors["Dr"])
+
+        cr_left = round(group_center + series_gap / 2)
+        cr_right = cr_left + bar_width
+        cr_top = value_to_y(credit)
+        draw.rounded_rectangle((cr_left, cr_top, cr_right, plot_bottom), radius=7, fill=bar_colors["Cr"])
+
+        dr_label = _format_month_dr_cr_chart_label(debit)
+        dr_bbox = draw.textbbox((0, 0), dr_label, font=font_label)
+        _draw_rotated_text(
+            image,
+            dr_label,
+            (
+                int((dr_left + dr_right) // 2 + label_offsets["Dr"] - ((dr_bbox[2] - dr_bbox[0]) * 0.14)),
+                int(max(plot_top - 8, dr_top - 42)),
+            ),
+            font_label,
+            label_text_color,
+            64,
+        )
+
+        cr_label = _format_month_dr_cr_chart_label(credit)
+        cr_bbox = draw.textbbox((0, 0), cr_label, font=font_label)
+        _draw_rotated_text(
+            image,
+            cr_label,
+            (
+                int((cr_left + cr_right) // 2 + label_offsets["Cr"] - ((cr_bbox[2] - cr_bbox[0]) * 0.12)),
+                int(max(plot_top - 8, cr_top - 42)),
+            ),
+            font_label,
+            label_text_color,
+            64,
+        )
+
+        draw_centered_text(month_label, round(group_center), plot_bottom + 18, font_regular, axis_text_color)
+
+    legend_x = panel_margin + 28
+    legend_y = panel_margin + 28
+    legend_cursor = legend_x
+    for legend_label, legend_color in (("Debit (Dr)", bar_colors["Dr"]), ("Credit (Cr)", bar_colors["Cr"])):
+        draw.rounded_rectangle((legend_cursor, legend_y + 4, legend_cursor + 16, legend_y + 20), radius=4, fill=legend_color)
+        draw.text((legend_cursor + 22, legend_y), legend_label, font=font_bold, fill=value_text_color)
+        label_bbox = draw.textbbox((0, 0), legend_label, font=font_bold)
+        legend_cursor += 22 + (label_bbox[2] - label_bbox[0]) + 28
+
+    image_bytes = BytesIO()
+    image.save(image_bytes, format="PNG")
+    image_bytes.seek(0)
+
+    chart_image = XLImage(image_bytes)
+    chart_image.width = width
+    chart_image.height = height
+    chart_row = footnote_row + 5
+    ws.add_image(chart_image, f"A{chart_row}")
 
 
 def _patch_month_dr_cr_chart_xml(final_path: Path, sheet_name: str, month_labels: list[str], logger) -> None:
@@ -1202,22 +1383,6 @@ def build_final_workbook(
     )
     _force_leading_equals_to_text(workbook)
     workbook.save(final_path)
-    _try_apply_excel_chart_postprocess(
-        final_path,
-        normalized_sheet_names.get("month_dr_cr", "month_dr_cr"),
-        logger,
-    )
-    month_chart_labels = [
-        str(value).strip()
-        for value in month_dr_cr_df.get("Yr-Month", pd.Series(dtype="object")).tolist()
-        if str(value).strip() and str(value).strip().lower() != "total"
-    ]
-    _patch_month_dr_cr_chart_xml(
-        final_path,
-        normalized_sheet_names.get("month_dr_cr", "month_dr_cr"),
-        month_chart_labels,
-        logger,
-    )
 
     logger.info("Final workbook created: %s", final_path)
     return final_path
