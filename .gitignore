@@ -26,10 +26,15 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Ignore all PDFs in the input folder
+# Ignore all PDFs,rar,xlsx in the input.output folder
 bankStmtv1/input/*.pdf
+bankStmtv1/input/*.PDF
 bankStmtv1/input/*.rar
+bankStmtv1/input/*.RAR
 bankStmtv1/output/*.xlsx
+bankStmtv1/output/*.XLSX
+bankStmtv1/output/*.xls
+bankStmtv1/output/*.XLS
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -45,6 +50,7 @@ node_modules/
 .npm-global/
 *.exe
 *.pdf
+*.PDF
 *.log
 
 # Unit test / coverage reports
@@ -193,3 +199,6 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+output/*
+!output/.gitkeep
