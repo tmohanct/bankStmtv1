@@ -45,6 +45,7 @@ SUMMARY_ROW_MARKERS = (
     "CLOSING BALANCE",
     "OPENING BALANCE",
 )
+SUMMARY_SCAN_EDGE_PAGES = 3
 
 
 def clean_cell(value: Any) -> str:
@@ -464,6 +465,18 @@ def prepare_pdf_for_reading(
         return decrypted_path.resolve()
 
 
+def _summary_candidate_page_indexes(page_count: int) -> list[int]:
+    if page_count <= 0:
+        return []
+
+    if page_count <= SUMMARY_SCAN_EDGE_PAGES * 2:
+        return list(range(page_count))
+
+    indexes = list(range(SUMMARY_SCAN_EDGE_PAGES))
+    indexes.extend(range(page_count - SUMMARY_SCAN_EDGE_PAGES, page_count))
+    return indexes
+
+
 def extract_summary_metrics(pdf_path: str, logger: logging.Logger) -> dict[str, float]:
     patterns = {
         "total_debit": re.compile(r"total\s+debit[:\s]*([\-0-9,]+\.\d{2})", re.IGNORECASE),
@@ -474,24 +487,36 @@ def extract_summary_metrics(pdf_path: str, logger: logging.Logger) -> dict[str, 
     }
     found: dict[str, float] = {}
 
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text() or ""
-            for key, pattern in patterns.items():
-                if key in found:
-                    continue
-                match = pattern.search(text)
-                if not match:
-                    continue
-                raw_value = match.group(1)
-                if key == "transaction_count":
-                    found[key] = float(int(raw_value))
-                else:
-                    parsed = parse_amount(raw_value)
-                    if parsed is not None:
-                        found[key] = abs(parsed)
+    candidate_pages: list[int] = []
+    try:
+        with fitz.open(str(pdf_path)) as pdf:
+            candidate_pages = _summary_candidate_page_indexes(len(pdf))
+            for page_index in candidate_pages:
+                text = pdf[page_index].get_text("text") or ""
+                for key, pattern in patterns.items():
+                    if key in found:
+                        continue
+                    match = pattern.search(text)
+                    if not match:
+                        continue
+                    raw_value = match.group(1)
+                    if key == "transaction_count":
+                        found[key] = float(int(raw_value))
+                    else:
+                        parsed = parse_amount(raw_value)
+                        if parsed is not None:
+                            found[key] = abs(parsed)
+                if len(found) == len(patterns):
+                    break
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Summary metric extraction skipped for %s: %s", pdf_path, exc)
+        return found
 
-    logger.debug("Summary metrics found in PDF: %s", found)
+    logger.debug(
+        "Summary metrics found in PDF candidate pages %s: %s",
+        [page_index + 1 for page_index in candidate_pages],
+        found,
+    )
     return found
 
 

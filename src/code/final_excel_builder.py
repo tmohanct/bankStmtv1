@@ -817,15 +817,15 @@ def _add_month_dr_cr_chart_image(ws, chart_data_end_row: int, footnote_row: int)
         width=2,
     )
 
-    font_regular = _load_chart_font(17)
-    font_small = _load_chart_font(14)
-    font_label = _load_chart_font(15)
-    font_bold = _load_chart_font(17, bold=True)
+    font_regular = _load_chart_font(12)
+    font_small = _load_chart_font(10)
+    font_label = _load_chart_font(10)
+    font_bold = _load_chart_font(12, bold=True)
 
     left_margin = panel_margin + 78
     right_margin = panel_margin + 34
     top_margin = panel_margin + 92
-    bottom_margin = panel_margin + 78
+    bottom_margin = panel_margin + 88
     plot_left = left_margin
     plot_top = top_margin
     plot_right = width - right_margin
@@ -901,7 +901,18 @@ def _add_month_dr_cr_chart_image(ws, chart_data_end_row: int, footnote_row: int)
             64,
         )
 
-        draw_centered_text(month_label, round(group_center), plot_bottom + 18, font_regular, axis_text_color)
+        month_bbox = draw.textbbox((0, 0), month_label, font=font_regular)
+        _draw_rotated_text(
+            image,
+            month_label,
+            (
+                int(round(group_center) - ((month_bbox[2] - month_bbox[0]) * 0.55)),
+                int(plot_bottom + 4),
+            ),
+            font_regular,
+            axis_text_color,
+            45,
+        )
 
     legend_x = panel_margin + 28
     legend_y = panel_margin + 28

@@ -103,6 +103,8 @@ TOKENIZED_TEXT_BREAK_PREFIXES = (
     "Closing Balance",
     "Count of Cr. & Dr. Transactions",
 )
+KVB_CHEQUE_HINT_RE = re.compile(r"\b(?:CHQ|CHEQ(?:UE)?|CLG|CLEARING|CTS|RETURN)\b", re.IGNORECASE)
+KVB_CHEQUE_TRAILER_RE = re.compile(r"^(?P<details>.+?)\s+(?P<cheque>0\d{5,}|\d{6,})$")
 
 
 @dataclass
@@ -171,7 +173,27 @@ def _split_ocr_body(body_text: str) -> tuple[str, str]:
     if parts and re.fullmatch(r"[0-9$]{3,}", parts[0]):
         cheque_no = parts.pop(0)
 
-    return clean_cell(" ".join(parts)), cheque_no
+    details_text = clean_cell(" ".join(parts))
+    if not cheque_no:
+        details_text, cheque_no = _extract_trailing_cheque_no(details_text)
+
+    return details_text, cheque_no
+
+
+def _extract_trailing_cheque_no(body_text: str) -> tuple[str, str]:
+    text = clean_cell(body_text)
+    if not text or not KVB_CHEQUE_HINT_RE.search(text):
+        return text, ""
+
+    match = KVB_CHEQUE_TRAILER_RE.match(text)
+    if match is None:
+        return text, ""
+
+    cheque_no = match.group("cheque")
+    if not cheque_no.strip("0"):
+        return text, ""
+
+    return clean_cell(match.group("details")), cheque_no
 
 
 def _classify_amount(
@@ -441,13 +463,7 @@ def _parse_text_row(line: str) -> dict[str, str] | None:
     body_text = clean_cell(rest[:body_end])
 
 
-    cheque_no = ""
-    ref_match = re.search(r"\s+(0|\d{6,})\s*$", body_text)
-    if ref_match:
-        candidate = ref_match.group(1)
-        body_text = clean_cell(body_text[: ref_match.start()])
-        if candidate.strip("0"):
-            cheque_no = candidate
+    body_text, cheque_no = _extract_trailing_cheque_no(body_text)
 
     return {
         "date_text": match.group("date"),
@@ -546,6 +562,9 @@ def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
         cheque_no = body_parts.pop(0)
 
     body_text = clean_cell(" ".join(body_parts))
+    if not cheque_no:
+        body_text, cheque_no = _extract_trailing_cheque_no(body_text)
+
     return PendingRecord(
         date_text=date_text,
         body_text=body_text,

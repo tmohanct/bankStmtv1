@@ -12,7 +12,7 @@
 2. Open PowerShell in the repo root.
 3. Run:
    ```powershell
-   .\install_fresh_machine.bat
+   .\install_new_machine.bat
    ```
 4. After setup finishes, run the parser with:
    ```powershell
@@ -25,7 +25,7 @@ If the folder was copied from another machine, the installer will automatically 
 Run this on the source machine:
 
 ```powershell
-.\build_windows_package.ps1
+.\build_fresh_machine_package.bat
 ```
 
 That creates a zip inside `dist\` with:
@@ -42,7 +42,7 @@ By default it excludes:
 If you want to include PDFs in the package:
 
 ```powershell
-.\build_windows_package.ps1 -IncludeInputPdfs
+.\build_fresh_machine_package.bat --include-input-pdfs
 ```
 
 ## What the setup script does

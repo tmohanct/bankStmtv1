@@ -13,6 +13,31 @@ import kvb_parser
 
 
 class KVBParserUnitTests(unittest.TestCase):
+    def test_extract_trailing_cheque_number_from_clg_detail(self) -> None:
+        details, cheque_no = kvb_parser._extract_trailing_cheque_no("To Clg:A RAJENDRAN - Federal Bank 000116")
+
+        self.assertEqual(details, "To Clg:A RAJENDRAN - Federal Bank")
+        self.assertEqual(cheque_no, "000116")
+
+    def test_parse_tokenized_row_extracts_trailing_cheque_number(self) -> None:
+        parsed = kvb_parser._parse_tokenized_text_row(
+            [
+                "08-12-2025 09:15:01",
+                "08-12-2025",
+                "To Clg:A RAJENDRAN - Federal Bank 000116",
+                "7,000.00",
+                "133.88",
+            ]
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.body_text, "To Clg:A RAJENDRAN - Federal Bank")
+        self.assertEqual(parsed.cheque_no, "000116")
+
+        record, _ = kvb_parser._finalize_record(parsed, 7133.88, kvb_parser.OCR_DATE_FORMATS)
+        self.assertEqual(record["Cheque No"], "000116")
+
     def test_parse_tokenized_row_with_datetime_start(self) -> None:
         parsed = kvb_parser._parse_tokenized_text_row(
             [
