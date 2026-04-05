@@ -24,7 +24,7 @@ OCR_ROW_RE = re.compile(
     r"(?P<balance>-?[0-9,]+\.\d{2}[\]\)\}]?)$"
 )
 OPENING_BALANCE_RE = re.compile(r"Opening Balance.*?(-?[0-9,]+\.\d{2})")
-OCR_DATE_FORMATS = ("%d-%m-%Y",)
+OCR_DATE_FORMATS = ("%d-%m-%Y", "%d/%m/%Y")
 TEXT_DATE_FORMATS = ("%d/%m/%y",)
 TEXT_ROW_RE = re.compile(
     r"^(?P<date>\d{2}/\d{2}/\d{2})\s+"
@@ -33,9 +33,13 @@ TEXT_ROW_RE = re.compile(
 )
 TEXT_AMOUNT_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{2,3})*|\d+)?\.\d{2}")
 TEXT_DETECTION_MIN_ROWS = 3
-TOKENIZED_TEXT_ROW_START_RE = re.compile(r"^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}$")
-TOKENIZED_TEXT_DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{4}$")
-TOKENIZED_TEXT_AMOUNT_RE = re.compile(r"^-?[0-9,]+\.\d{2}$")
+TOKENIZED_TEXT_ROW_START_RE = re.compile(r"^\d{2}[-/]\d{2}[-/]\d{4}\s+\d{2}:\d{2}(?::\d{2})?$")
+TOKENIZED_TEXT_DATE_RE = re.compile(r"^\d{2}[-/]\d{2}[-/]\d{4}$")
+TOKENIZED_TEXT_TIME_RE = re.compile(r"^\d{2}:\d{2}(?::\d{2})?$")
+TOKENIZED_TEXT_AMOUNT_RE = re.compile(
+    r"^-?\(?[0-9,]+\.\d{2}\)?(?:CR|DR|MR|[\]\)\}])?$",
+    re.IGNORECASE,
+)
 OCR_FOOTER_PREFIXES = ("Page No.",)
 OCR_HEADER_PREFIXES = (
     "Account Statement",
@@ -79,6 +83,25 @@ DEBIT_HINTS = (
     "TR TO ",
     "FT - DR",
     "FT -100",
+)
+TOKENIZED_TEXT_BREAK_PREFIXES = (
+    "Karur Vysya Bank does not ask",
+    "Never disclose your passwords",
+    "Account Statement",
+    "THE KARUR VYSYA BANK LTD.",
+    "Acc.No.",
+    "Customer ID",
+    "Acc.Type",
+    "St.Date",
+    "St.Period",
+    "Mobile No.",
+    "Email Id",
+    "Account Summary",
+    "Opening Balance",
+    "Total Credit Amount",
+    "Total Debit Amount",
+    "Closing Balance",
+    "Count of Cr. & Dr. Transactions",
 )
 
 
@@ -128,6 +151,7 @@ def _render_page_text(page: fitz.Page) -> str:
 
 def _clean_ocr_line(raw_line: str) -> str:
     return clean_cell(raw_line)
+
 
 def _should_skip_ocr_line(line: str) -> bool:
     if not line:
@@ -197,13 +221,55 @@ def _finalize_record(
     return record, next_balance
 
 
+def _finalize_tokenized_pending_record(
+    current_row_lines: list[str],
+    records: list[dict[str, Any]],
+    previous_balance: float | None,
+    progress_cb=None,
+) -> tuple[list[str], float | None]:
+    if not current_row_lines:
+        return [], previous_balance
+
+    parsed = _parse_tokenized_text_row(current_row_lines)
+    if parsed is None:
+        return [], previous_balance
+
+    record, next_balance = _finalize_record(parsed, previous_balance, OCR_DATE_FORMATS)
+    records.append(record)
+    if progress_cb is not None:
+        progress_cb(len(records))
+    return [], next_balance
+
+
+def _looks_like_tokenized_row_start(line: str, next_line: str = "") -> bool:
+    if TOKENIZED_TEXT_ROW_START_RE.match(line):
+        return True
+    if not TOKENIZED_TEXT_DATE_RE.match(line):
+        return False
+    return bool(TOKENIZED_TEXT_TIME_RE.match(next_line) or TOKENIZED_TEXT_DATE_RE.match(next_line))
+
+
+def _is_tokenized_text_break_line(line: str) -> bool:
+    if not line:
+        return True
+    if line.startswith("Page No.") or line.lower().startswith("page :"):
+        return True
+    if re.fullmatch(r"Page \d+ of \d+", line, flags=re.IGNORECASE):
+        return True
+    return any(line.startswith(prefix) for prefix in TOKENIZED_TEXT_BREAK_PREFIXES)
+
+
 def _parse_ocr_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
     tesseract_cmd = _configure_tesseract()
     logger.info("Parsing KVB statement with OCR layout: %s | tesseract=%s", pdf_path, tesseract_cmd)
 
-    records: list[dict[str, Any]] = []
-    previous_balance: float | None = None
-    pending: PendingRecord | None = None
+    inline_records: list[dict[str, Any]] = []
+    inline_previous_balance: float | None = None
+    inline_pending: PendingRecord | None = None
+
+    tokenized_records: list[dict[str, Any]] = []
+    tokenized_previous_balance: float | None = None
+    current_row_lines: list[str] = []
 
     with fitz.open(pdf_path) as pdf:
         for page_idx, page in enumerate(pdf, start=1):
@@ -211,29 +277,50 @@ def _parse_ocr_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[s
             lines = text.splitlines()
             logger.debug("Page %s: OCR extracted %s line(s)", page_idx, len(lines))
 
-            for raw_line in lines:
-                line = _clean_ocr_line(raw_line)
+            cleaned_lines = [_clean_ocr_line(raw_line) for raw_line in lines]
+            for line in cleaned_lines:
                 if not line:
                     continue
 
                 opening_match = OPENING_BALANCE_RE.search(line)
-                if opening_match and previous_balance is None:
-                    previous_balance = parse_amount(opening_match.group(1))
+                if opening_match:
+                    opening_balance = parse_amount(opening_match.group(1))
+                    if inline_previous_balance is None:
+                        inline_previous_balance = opening_balance
+                    if tokenized_previous_balance is None:
+                        tokenized_previous_balance = opening_balance
+
+            usable_lines = [line for line in cleaned_lines if line and not _should_skip_ocr_line(line)]
+
+            for idx, line in enumerate(usable_lines):
+                next_line = usable_lines[idx + 1] if idx + 1 < len(usable_lines) else ""
+                if _looks_like_tokenized_row_start(line, next_line):
+                    current_row_lines, tokenized_previous_balance = _finalize_tokenized_pending_record(
+                        current_row_lines,
+                        tokenized_records,
+                        tokenized_previous_balance,
+                        progress_cb=progress_cb,
+                    )
+                    current_row_lines = [line]
                     continue
 
-                if _should_skip_ocr_line(line):
-                    continue
+                if current_row_lines:
+                    current_row_lines.append(line)
 
                 match = OCR_ROW_RE.match(line)
                 if match:
-                    if pending is not None:
-                        record, previous_balance = _finalize_record(pending, previous_balance, OCR_DATE_FORMATS)
-                        records.append(record)
+                    if inline_pending is not None:
+                        record, inline_previous_balance = _finalize_record(
+                            inline_pending,
+                            inline_previous_balance,
+                            OCR_DATE_FORMATS,
+                        )
+                        inline_records.append(record)
                         if progress_cb is not None:
-                            progress_cb(len(records))
+                            progress_cb(len(inline_records))
 
                     details, cheque_no = _split_ocr_body(match.group("body"))
-                    pending = PendingRecord(
+                    inline_pending = PendingRecord(
                         date_text=match.group("date"),
                         body_text=details,
                         amount_text=match.group("amount"),
@@ -242,20 +329,42 @@ def _parse_ocr_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[s
                     )
                     continue
 
-                if pending is not None and not _should_skip_ocr_line(line):
-                    pending.continuation_lines.append(line)
+                if inline_pending is not None:
+                    inline_pending.continuation_lines.append(line)
 
-    if pending is not None:
-        record, previous_balance = _finalize_record(pending, previous_balance, OCR_DATE_FORMATS)
-        records.append(record)
+    if inline_pending is not None:
+        record, inline_previous_balance = _finalize_record(inline_pending, inline_previous_balance, OCR_DATE_FORMATS)
+        inline_records.append(record)
         if progress_cb is not None:
-            progress_cb(len(records))
+            progress_cb(len(inline_records))
 
-    for index, record in enumerate(records, start=1):
+    current_row_lines, tokenized_previous_balance = _finalize_tokenized_pending_record(
+        current_row_lines,
+        tokenized_records,
+        tokenized_previous_balance,
+        progress_cb=progress_cb,
+    )
+
+    selected_records = inline_records
+    selected_balance = inline_previous_balance
+    selected_mode = "inline"
+    if len(tokenized_records) > len(inline_records):
+        selected_records = tokenized_records
+        selected_balance = tokenized_previous_balance
+        selected_mode = "tokenized"
+
+    logger.info(
+        "KVB OCR parse candidates: inline_rows=%s tokenized_rows=%s selected=%s",
+        len(inline_records),
+        len(tokenized_records),
+        selected_mode,
+    )
+
+    for index, record in enumerate(selected_records, start=1):
         record["Sno"] = index
 
-    logger.info("KVB OCR parse complete: rows=%s ending_balance=%s", len(records), previous_balance)
-    return records
+    logger.info("KVB OCR parse complete: rows=%s ending_balance=%s", len(selected_records), selected_balance)
+    return selected_records
 
 
 
@@ -367,8 +476,14 @@ def _detect_tokenized_text_layout(pdf_path: str) -> bool:
     row_hits = 0
     with fitz.open(pdf_path) as pdf:
         for page_idx, page in enumerate(pdf, start=1):
-            for raw_line in page.get_text("text").splitlines():
-                if TOKENIZED_TEXT_ROW_START_RE.match(clean_cell(raw_line)):
+            significant_lines = [
+                clean_cell(raw_line)
+                for raw_line in page.get_text("text").splitlines()
+                if clean_cell(raw_line)
+            ]
+            for idx, line in enumerate(significant_lines):
+                next_line = significant_lines[idx + 1] if idx + 1 < len(significant_lines) else ""
+                if _looks_like_tokenized_row_start(line, next_line):
                     row_hits += 1
                     if row_hits >= TEXT_DETECTION_MIN_ROWS:
                         return True
@@ -386,16 +501,30 @@ def _extract_opening_balance_from_text(page_text: str) -> float | None:
 
 
 def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
-    if len(row_lines) < 5:
+    normalized_lines = [clean_cell(line) for line in row_lines if clean_cell(line)]
+    if len(normalized_lines) < 4:
         return None
-    if not TOKENIZED_TEXT_ROW_START_RE.match(row_lines[0]):
+
+    date_text = ""
+    cursor = 0
+    if TOKENIZED_TEXT_ROW_START_RE.match(normalized_lines[0]):
+        date_text = normalized_lines[0].split()[0]
+        cursor = 1
+    elif TOKENIZED_TEXT_DATE_RE.match(normalized_lines[0]):
+        date_text = normalized_lines[0]
+        cursor = 1
+        if cursor < len(normalized_lines) and TOKENIZED_TEXT_TIME_RE.match(normalized_lines[cursor]):
+            cursor += 1
+    else:
         return None
-    if not TOKENIZED_TEXT_DATE_RE.match(row_lines[1]):
+
+    if cursor >= len(normalized_lines) or not TOKENIZED_TEXT_DATE_RE.match(normalized_lines[cursor]):
         return None
+    cursor += 1
 
     amount_positions = [
         idx
-        for idx, value in enumerate(row_lines[2:], start=2)
+        for idx, value in enumerate(normalized_lines[cursor:], start=cursor)
         if TOKENIZED_TEXT_AMOUNT_RE.match(value)
     ]
     if len(amount_positions) < 2:
@@ -406,9 +535,11 @@ def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
     if amount_idx >= balance_idx:
         return None
 
-    amount_text = row_lines[amount_idx]
-    balance_text = row_lines[balance_idx]
-    body_parts = [part for part in row_lines[3:amount_idx] if clean_cell(part)]
+    amount_text = normalized_lines[amount_idx]
+    balance_text = normalized_lines[balance_idx]
+    body_parts = [part for part in normalized_lines[cursor:amount_idx] if clean_cell(part)]
+    if body_parts and body_parts[0].isdigit() and len(body_parts[0]) <= 4:
+        body_parts.pop(0)
 
     cheque_no = ""
     if body_parts and re.fullmatch(r"\d{6,}", body_parts[0]):
@@ -416,7 +547,7 @@ def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
 
     body_text = clean_cell(" ".join(body_parts))
     return PendingRecord(
-        date_text=row_lines[0].split()[0],
+        date_text=date_text,
         body_text=body_text,
         amount_text=amount_text,
         balance_text=balance_text,
@@ -450,28 +581,33 @@ def _parse_tokenized_text_statement(pdf_path: str, logger, progress_cb=None) -> 
     with fitz.open(pdf_path) as pdf:
         for page_idx, page in enumerate(pdf, start=1):
             page_text = page.get_text("text")
-            lines = page_text.splitlines()
-            logger.debug("Page %s: tokenized text extracted %s line(s)", page_idx, len(lines))
+            raw_lines = page_text.splitlines()
+            logger.debug("Page %s: tokenized text extracted %s line(s)", page_idx, len(raw_lines))
 
             if previous_balance is None:
                 opening_balance = _extract_opening_balance_from_text(page_text)
                 if opening_balance is not None:
                     previous_balance = opening_balance
 
-            for raw_line in lines:
-                line = clean_cell(raw_line)
-                if not line or line.startswith("Page No."):
-                    continue
+            significant_lines = [clean_cell(raw_line) for raw_line in raw_lines if clean_cell(raw_line)]
 
-                if TOKENIZED_TEXT_ROW_START_RE.match(line):
+            for idx, line in enumerate(significant_lines):
+                next_line = significant_lines[idx + 1] if idx + 1 < len(significant_lines) else ""
+                if _looks_like_tokenized_row_start(line, next_line):
                     finalize_current_row()
                     current_row_lines = [line]
+                    continue
+
+                if _is_tokenized_text_break_line(line):
+                    finalize_current_row()
                     continue
 
                 if current_row_lines:
                     current_row_lines.append(line)
 
-        finalize_current_row()
+            # KVB rows do not continue across pages; closing the row here avoids
+            # the next page header/summary being appended to the previous row.
+            finalize_current_row()
 
     for index, record in enumerate(records, start=1):
         record["Sno"] = index

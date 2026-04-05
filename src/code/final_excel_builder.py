@@ -1,10 +1,20 @@
+import os
 import re
+import subprocess
+import sys
+import tempfile
+import textwrap
+import zipfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.chart import BarChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.shapes import GraphicalProperties, LineProperties
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from utils import OUTPUT_COLUMNS, clean_detail, compact_detail_key, sanitize_cheque_column
@@ -42,6 +52,9 @@ THIN_BORDER = Border(
     bottom=Side(style="thin", color="BFBFBF"),
 )
 MONTH_DR_CR_FOOTNOTE = "#.OF Dr/Cr & Avg takes only amount Greater than 30. Less than 30 not counted."
+C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 DIRECT_RETURN_REJECT_MARKERS = (
     "WCHQRET",
     "CHQRETURN",
@@ -629,10 +642,8 @@ def _apply_month_dr_cr_style(workbook, sheet_name: str) -> None:
                     cell.font = FONT_HEADER
                 cell.alignment = ALIGN_RIGHT
                 if isinstance(cell.value, (int, float)):
-                    if header_value in {"#.Of.Dr", "#.Of.Cr"}:
+                    if header_value in {"#.Of.Dr", "#.Of.Cr", "EOM Balance", "Avg.Dr", "Avg.Cr"}:
                         cell.number_format = INDIAN_NUMBER_FORMAT_NO_DECIMAL
-                    elif header_value in {"EOM Balance", "Avg.Dr", "Avg.Cr"}:
-                        cell.number_format = INDIAN_NUMBER_FORMAT
                     else:
                         cell.number_format = INDIAN_NUMBER_FORMAT_NO_DECIMAL
                 cell.fill = MONTH_VALUE_ROW_FILLS[(row_idx - 2) % len(MONTH_VALUE_ROW_FILLS)]
@@ -658,6 +669,413 @@ def _apply_month_dr_cr_style(workbook, sheet_name: str) -> None:
     footnote_cell.value = MONTH_DR_CR_FOOTNOTE
     footnote_cell.font = FONT_FOOTNOTE
     footnote_cell.alignment = ALIGN_LEFT
+
+    chart_data_end_row = data_max_row
+    if chart_data_end_row >= 2:
+        last_label = str(ws.cell(row=chart_data_end_row, column=1).value or "").strip().lower()
+        if last_label == "total":
+            chart_data_end_row -= 1
+
+    if chart_data_end_row >= 2:
+        chart = BarChart()
+        chart.type = "col"
+        chart.style = 10
+        chart.grouping = "clustered"
+        chart.overlap = 0
+        chart.gapWidth = 70
+        chart.title = None
+        chart.y_axis.title = None
+        chart.x_axis.title = None
+        chart.x_axis.axPos = "b"
+        chart.y_axis.axPos = "l"
+        chart.x_axis.tickLblPos = "low"
+        chart.y_axis.tickLblPos = "none"
+        chart.x_axis.delete = False
+        chart.y_axis.delete = False
+        chart.legend.position = "r"
+        chart.height = 10.5
+        chart.width = 20
+        chart.y_axis.majorGridlines.spPr = GraphicalProperties(
+            ln=LineProperties(
+                solidFill="D9D9D9",
+                prstDash="sysDot",
+                w=12700,
+            )
+        )
+
+        data = Reference(ws, min_col=2, max_col=3, min_row=1, max_row=chart_data_end_row)
+        categories = Reference(ws, min_col=1, min_row=2, max_row=chart_data_end_row)
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(categories)
+
+        chart.dLbls = DataLabelList()
+        chart.dLbls.showVal = True
+        chart.dLbls.showCatName = False
+        chart.dLbls.showSerName = False
+        chart.dLbls.showLegendKey = False
+        chart.dLbls.dLblPos = "outEnd"
+        chart.dLbls.numFmt = "#,##,##0"
+
+        series_colors = ("4F81BD", "ED7D31")
+        for series, color in zip(chart.ser, series_colors):
+            series.graphicalProperties.solidFill = color
+            series.graphicalProperties.line.solidFill = color
+
+        chart_row = footnote_row + 5
+        ws.add_chart(chart, f"A{chart_row}")
+
+
+def _format_month_dr_cr_chart_label(value: Any) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return ""
+
+    absolute = abs(numeric)
+    if absolute >= 100000:
+        return f"{numeric / 100000:.1f}L"
+    if absolute >= 1000:
+        return f"{numeric / 1000:.1f}k"
+    return f"{numeric:.1f}"
+
+
+def _patch_month_dr_cr_chart_xml(final_path: Path, sheet_name: str, month_labels: list[str], logger) -> None:
+    if not month_labels or not final_path.is_file():
+        return
+
+    ET.register_namespace("", C_NS)
+    ET.register_namespace("a", A_NS)
+    ET.register_namespace("r", R_NS)
+
+    formula_sheet_name = sheet_name.replace("'", "''")
+    category_formula = f"'{formula_sheet_name}'!$A$2:$A${len(month_labels) + 1}"
+    namespaces = {"c": C_NS}
+
+    def build_str_ref(parent: ET.Element) -> None:
+        str_ref = ET.SubElement(parent, f"{{{C_NS}}}strRef")
+        formula = ET.SubElement(str_ref, f"{{{C_NS}}}f")
+        formula.text = category_formula
+
+        cache = ET.SubElement(str_ref, f"{{{C_NS}}}strCache")
+        point_count = ET.SubElement(cache, f"{{{C_NS}}}ptCount")
+        point_count.set("val", str(len(month_labels)))
+        for idx, label in enumerate(month_labels):
+            point = ET.SubElement(cache, f"{{{C_NS}}}pt")
+            point.set("idx", str(idx))
+            value = ET.SubElement(point, f"{{{C_NS}}}v")
+            value.text = str(label)
+
+    temp_output: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
+            temp_output = Path(temp_file.name)
+
+        with zipfile.ZipFile(final_path, "r") as source_zip, zipfile.ZipFile(temp_output, "w") as target_zip:
+            for entry in source_zip.infolist():
+                content = source_zip.read(entry.filename)
+                if entry.filename.startswith("xl/charts/chart") and entry.filename.endswith(".xml"):
+                    root = ET.fromstring(content)
+                    changed = False
+
+                    chart_node = root.find("c:chart", namespaces)
+                    if chart_node is not None:
+                        chart_title = chart_node.find("c:title", namespaces)
+                        if chart_title is not None:
+                            chart_node.remove(chart_title)
+                            changed = True
+
+                    for ser in root.findall(".//c:barChart/c:ser", namespaces):
+                        cat = ser.find("c:cat", namespaces)
+                        if cat is None:
+                            continue
+                        for child in list(cat):
+                            cat.remove(child)
+                        build_str_ref(cat)
+                        changed = True
+
+                    cat_axis = root.find(".//c:catAx", namespaces)
+                    if cat_axis is not None:
+                        delete_node = cat_axis.find("c:delete", namespaces)
+                        if delete_node is None:
+                            delete_node = ET.SubElement(cat_axis, f"{{{C_NS}}}delete")
+                        delete_node.set("val", "0")
+
+                        ax_pos = cat_axis.find("c:axPos", namespaces)
+                        if ax_pos is not None:
+                            ax_pos.set("val", "b")
+
+                        tick_label_pos = cat_axis.find("c:tickLblPos", namespaces)
+                        if tick_label_pos is None:
+                            tick_label_pos = ET.SubElement(cat_axis, f"{{{C_NS}}}tickLblPos")
+                        tick_label_pos.set("val", "low")
+                        changed = True
+
+                    val_axis = root.find(".//c:valAx", namespaces)
+                    if val_axis is not None:
+                        delete_node = val_axis.find("c:delete", namespaces)
+                        if delete_node is None:
+                            delete_node = ET.SubElement(val_axis, f"{{{C_NS}}}delete")
+                        delete_node.set("val", "0")
+
+                        ax_pos = val_axis.find("c:axPos", namespaces)
+                        if ax_pos is not None:
+                            ax_pos.set("val", "l")
+                        tick_label_pos = val_axis.find("c:tickLblPos", namespaces)
+                        if tick_label_pos is None:
+                            tick_label_pos = ET.SubElement(val_axis, f"{{{C_NS}}}tickLblPos")
+                        tick_label_pos.set("val", "none")
+                        axis_title = val_axis.find("c:title", namespaces)
+                        if axis_title is not None:
+                            val_axis.remove(axis_title)
+                        changed = True
+
+                    legend = root.find(".//c:legend", namespaces)
+                    if legend is not None:
+                        legend_pos = legend.find("c:legendPos", namespaces)
+                        if legend_pos is None:
+                            legend_pos = ET.SubElement(legend, f"{{{C_NS}}}legendPos")
+                        legend_pos.set("val", "r")
+                        changed = True
+
+                    if changed:
+                        content = ET.tostring(root, encoding="utf-8", xml_declaration=False)
+
+                target_zip.writestr(entry, content)
+
+        temp_output.replace(final_path)
+        logger.info("Patched month_dr_cr chart XML with explicit month categories")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Unable to patch month_dr_cr chart XML. Details: %s", exc)
+        if temp_output is not None and temp_output.exists():
+            try:
+                temp_output.unlink()
+            except OSError:
+                pass
+
+
+def _try_apply_excel_chart_postprocess(final_path: Path, sheet_name: str, logger) -> None:
+    if not sys.platform.startswith("win"):
+        return
+
+    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    powershell_exe = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    if not powershell_exe.is_file():
+        logger.warning("Skipping Excel chart post-process because PowerShell was not found: %s", powershell_exe)
+        return
+
+    script_text = textwrap.dedent(
+        r"""
+        param(
+            [Parameter(Mandatory = $true)][string]$WorkbookPath,
+            [Parameter(Mandatory = $true)][string]$SheetName,
+            [Parameter(Mandatory = $true)][string]$FootnoteText
+        )
+
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
+
+        function Get-CompactLabel([double]$Value) {
+            $absolute = [Math]::Abs($Value)
+            if ($absolute -ge 100000) {
+                return ('{0:0.0}L' -f ($Value / 100000.0))
+            }
+            if ($absolute -ge 1000) {
+                return ('{0:0.0}k' -f ($Value / 1000.0))
+            }
+            return ('{0:0.0}' -f $Value)
+        }
+
+        function Find-RowByValue($Worksheet, [string]$Text, [int]$MaxRow) {
+            for ($row = 1; $row -le $MaxRow; $row++) {
+                if ([string]$Worksheet.Cells.Item($row, 1).Value2 -eq $Text) {
+                    return $row
+                }
+            }
+            return 0
+        }
+
+        $xlCategory = 1
+        $xlValue = 2
+        $xlColumns = 2
+        $xlColumnClustered = 51
+        $xlLegendPositionRight = -4152
+        $xlTickLabelPositionLow = -4134
+        $xlTickLabelPositionNone = -4142
+        $xlLabelPositionOutsideEnd = 2
+        $msoLineRoundDot = 3
+
+        $excel = $null
+        $workbook = $null
+        $saveChanges = $false
+        try {
+            $excel = New-Object -ComObject Excel.Application
+            $excel.Visible = $false
+            $excel.DisplayAlerts = $false
+
+            $workbook = $excel.Workbooks.Open($WorkbookPath)
+            $worksheet = $workbook.Worksheets.Item($SheetName)
+
+            $usedRows = $worksheet.UsedRange.Rows.Count
+            $footnoteRow = Find-RowByValue $worksheet $FootnoteText $usedRows
+            if ($footnoteRow -le 0) {
+                throw "Unable to locate the month_dr_cr footnote row."
+            }
+
+            $chartDataEndRow = $footnoteRow - 2
+            if ($chartDataEndRow -lt 2) {
+                throw "month_dr_cr sheet does not contain chart data rows."
+            }
+
+            if ([string]$worksheet.Cells.Item($chartDataEndRow, 1).Value2 -eq 'Total') {
+                $chartDataEndRow -= 1
+            }
+            if ($chartDataEndRow -lt 2) {
+                throw "month_dr_cr chart has no month rows after excluding Total."
+            }
+
+            if ($worksheet.ChartObjects().Count -ge 1) {
+                $chartObject = $worksheet.ChartObjects(1)
+                $existingChart = $true
+            } else {
+                $existingChart = $false
+                $chartRow = $footnoteRow + 5
+                $left = $worksheet.Range("A$chartRow").Left
+                $top = $worksheet.Range("A$chartRow").Top
+                $width = $worksheet.Range("A1:I1").Width
+                if ($width -lt 850) {
+                    $width = 850
+                }
+                $height = 380
+                $chartObject = $worksheet.ChartObjects().Add($left, $top, $width, $height)
+            }
+
+            $chart = $chartObject.Chart
+            $chart.ChartType = $xlColumnClustered
+            $chart.HasTitle = $false
+            $chart.HasLegend = $true
+            $chart.Legend.Position = $xlLegendPositionRight
+            $chart.Legend.IncludeInLayout = $false
+            $chart.HasAxis($xlCategory, 1) = $true
+            $chart.HasAxis($xlValue, 1) = $true
+
+            if (-not $existingChart) {
+                $sourceRange = $worksheet.Range("A1:C$chartDataEndRow")
+                $chart.SetSourceData($sourceRange, $xlColumns)
+            }
+            $worksheet.Activate() | Out-Null
+            $chartObject.Activate()
+            $chart = $excel.ActiveChart
+
+            $categoryRange = $worksheet.Range("A2:A$chartDataEndRow")
+            $seriesSpecs = @(
+                @{ Index = 1; Name = 'Debit (Dr)'; Column = 2; Color = [System.Drawing.ColorTranslator]::ToOle([System.Drawing.Color]::FromArgb(79, 129, 189)) },
+                @{ Index = 2; Name = 'Credit (Cr)'; Column = 3; Color = [System.Drawing.ColorTranslator]::ToOle([System.Drawing.Color]::FromArgb(237, 125, 49)) }
+            )
+            foreach ($spec in $seriesSpecs) {
+                if ($chart.SeriesCollection().Count -lt $spec.Index) {
+                    continue
+                }
+                $series = $chart.SeriesCollection($spec.Index)
+                $series.Name = $spec.Name
+                $series.XValues = $categoryRange
+                $series.Format.Fill.Visible = $true
+                $series.Format.Fill.Solid()
+                $series.Format.Fill.ForeColor.RGB = $spec.Color
+                $series.Format.Line.Visible = $false
+                $series.ApplyDataLabels()
+
+                for ($pointIndex = 1; $pointIndex -le $series.Points().Count; $pointIndex++) {
+                    $point = $series.Points($pointIndex)
+                    $point.HasDataLabel = $true
+
+                    $value = [double]$worksheet.Cells.Item($pointIndex + 1, $spec.Column).Value2
+                    $label = $point.DataLabel
+                    $label.ShowValue = $false
+                    $label.ShowSeriesName = $false
+                    $label.ShowCategoryName = $false
+                    $label.AutoText = $false
+                    $label.Caption = Get-CompactLabel $value
+                    $label.Position = $xlLabelPositionOutsideEnd
+                    $label.Font.Size = 9
+                }
+            }
+
+            $categoryAxis = $chart.Axes($xlCategory)
+            $categoryAxis.TickLabelPosition = $xlTickLabelPositionLow
+            $categoryAxis.TickLabelSpacing = 1
+            $categoryAxis.TickMarkSpacing = 1
+            $categoryAxis.HasTitle = $false
+
+            $valueAxis = $chart.Axes($xlValue)
+            $valueAxis.HasTitle = $false
+            $valueAxis.TickLabelPosition = $xlTickLabelPositionNone
+            $valueAxis.HasMajorGridlines = $true
+            $valueAxis.MajorGridlines.Format.Line.Visible = $true
+            $valueAxis.MajorGridlines.Format.Line.ForeColor.RGB = [System.Drawing.ColorTranslator]::ToOle([System.Drawing.Color]::FromArgb(217, 217, 217))
+            $valueAxis.MajorGridlines.Format.Line.DashStyle = $msoLineRoundDot
+            $valueAxis.MajorGridlines.Format.Line.Weight = 0.75
+
+            $chart.Legend.Top = 8
+            $chart.Legend.Left = $chart.ChartArea.Width - $chart.Legend.Width - 12
+            $chart.PlotArea.InsideTop = 18
+            $chart.PlotArea.InsideHeight = 265
+
+            $workbook.Save()
+            $saveChanges = $true
+        }
+        finally {
+            if ($workbook -ne $null) {
+                $workbook.Close($saveChanges)
+                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($workbook) | Out-Null
+            }
+            if ($excel -ne $null) {
+                $excel.Quit()
+                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null
+            }
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+        }
+        """
+    ).strip()
+
+    temp_script_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".ps1", delete=False, encoding="utf-8") as temp_script:
+            temp_script.write(script_text)
+            temp_script_path = Path(temp_script.name)
+
+        completed = subprocess.run(
+            [
+                str(powershell_exe),
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(temp_script_path),
+                str(final_path),
+                sheet_name,
+                MONTH_DR_CR_FOOTNOTE,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            stderr = completed.stderr.strip() or completed.stdout.strip()
+            logger.warning("Excel chart post-process failed; keeping openpyxl chart. Details: %s", stderr)
+        else:
+            logger.info("Applied Excel chart post-process for %s", sheet_name)
+    except OSError as exc:
+        logger.warning("Skipping Excel chart post-process because PowerShell could not be started: %s", exc)
+    finally:
+        if temp_script_path is not None:
+            try:
+                temp_script_path.unlink()
+            except OSError:
+                pass
 
 
 def _apply_repeat_group_colors(workbook, sheet_name: str, amount_column: str) -> None:
@@ -784,6 +1202,22 @@ def build_final_workbook(
     )
     _force_leading_equals_to_text(workbook)
     workbook.save(final_path)
+    _try_apply_excel_chart_postprocess(
+        final_path,
+        normalized_sheet_names.get("month_dr_cr", "month_dr_cr"),
+        logger,
+    )
+    month_chart_labels = [
+        str(value).strip()
+        for value in month_dr_cr_df.get("Yr-Month", pd.Series(dtype="object")).tolist()
+        if str(value).strip() and str(value).strip().lower() != "total"
+    ]
+    _patch_month_dr_cr_chart_xml(
+        final_path,
+        normalized_sheet_names.get("month_dr_cr", "month_dr_cr"),
+        month_chart_labels,
+        logger,
+    )
 
     logger.info("Final workbook created: %s", final_path)
     return final_path

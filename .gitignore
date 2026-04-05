@@ -26,6 +26,11 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Ignore all PDFs in the input folder
+bankStmtv1/input/*.pdf
+bankStmtv1/input/*.rar
+bankStmtv1/output/*.xlsx
+
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
