@@ -5,6 +5,7 @@ import sys
 import tempfile
 import textwrap
 import zipfile
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from io import BytesIO
 from datetime import date, datetime
 from pathlib import Path
@@ -53,6 +54,8 @@ THIN_BORDER = Border(
 )
 MONTH_DR_CR_FOOTNOTE = "#.OF Dr/Cr & Avg takes only amount Greater than 30. Less than 30 not counted."
 MONTH_DR_CR_CHART_IMAGE_SIZE = (1120, 520)
+MONTH_DR_CR_DATA_LABEL_FONT_SIZE = 11
+MONTH_DR_CR_EXCEL_DATA_LABEL_FONT_SIZE = 10
 C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -141,6 +144,24 @@ def _coerce_excel_date(value: Any) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _round_money_for_excel(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+
+    try:
+        rounded = Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return None
+
+    return int(rounded)
 
 
 def _ensure_columns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -584,7 +605,10 @@ def _apply_base_style(workbook) -> None:
                 cell.font = FONT_NORMAL
                 cell.alignment = align_by_col.get(col_idx, ALIGN_CENTER)
                 if col_idx in numeric_cols:
-                    cell.number_format = INDIAN_NUMBER_FORMAT
+                    rounded_value = _round_money_for_excel(cell.value)
+                    if rounded_value is not None:
+                        cell.value = rounded_value
+                    cell.number_format = INDIAN_NUMBER_FORMAT_NO_DECIMAL
                 if col_idx in date_cols:
                     parsed_date = _coerce_excel_date(cell.value)
                     if parsed_date is not None:
@@ -643,10 +667,10 @@ def _apply_month_dr_cr_style(workbook, sheet_name: str) -> None:
                     cell.font = FONT_HEADER
                 cell.alignment = ALIGN_RIGHT
                 if isinstance(cell.value, (int, float)):
-                    if header_value in {"#.Of.Dr", "#.Of.Cr", "EOM Balance", "Avg.Dr", "Avg.Cr"}:
-                        cell.number_format = INDIAN_NUMBER_FORMAT_NO_DECIMAL
-                    else:
-                        cell.number_format = INDIAN_NUMBER_FORMAT_NO_DECIMAL
+                    rounded_value = _round_money_for_excel(cell.value)
+                    if rounded_value is not None:
+                        cell.value = rounded_value
+                    cell.number_format = INDIAN_NUMBER_FORMAT_NO_DECIMAL
                 cell.fill = MONTH_VALUE_ROW_FILLS[(row_idx - 2) % len(MONTH_VALUE_ROW_FILLS)]
 
     ws.column_dimensions["A"].width = 14
@@ -819,7 +843,7 @@ def _add_month_dr_cr_chart_image(ws, chart_data_end_row: int, footnote_row: int)
 
     font_regular = _load_chart_font(12)
     font_small = _load_chart_font(10)
-    font_label = _load_chart_font(10)
+    font_label = _load_chart_font(MONTH_DR_CR_DATA_LABEL_FONT_SIZE)
     font_bold = _load_chart_font(12, bold=True)
 
     left_margin = panel_margin + 78
@@ -1191,7 +1215,7 @@ def _try_apply_excel_chart_postprocess(final_path: Path, sheet_name: str, logger
                     $label.AutoText = $false
                     $label.Caption = Get-CompactLabel $value
                     $label.Position = $xlLabelPositionOutsideEnd
-                    $label.Font.Size = 9
+                    $label.Font.Size = __MONTH_DR_CR_EXCEL_DATA_LABEL_FONT_SIZE__
                 }
             }
 
@@ -1231,6 +1255,9 @@ def _try_apply_excel_chart_postprocess(final_path: Path, sheet_name: str, logger
             [GC]::WaitForPendingFinalizers()
         }
         """
+    ).replace(
+        "__MONTH_DR_CR_EXCEL_DATA_LABEL_FONT_SIZE__",
+        str(MONTH_DR_CR_EXCEL_DATA_LABEL_FONT_SIZE),
     ).strip()
 
     temp_script_path: Path | None = None
@@ -1295,9 +1322,10 @@ def _apply_repeat_group_colors(workbook, sheet_name: str, amount_column: str) ->
         if raw_value in (None, ""):
             continue
 
-        try:
-            key = f"{float(raw_value):.2f}"
-        except (TypeError, ValueError):
+        rounded_value = _round_money_for_excel(raw_value)
+        if rounded_value is not None:
+            key = str(rounded_value)
+        else:
             key = str(raw_value)
 
         if key not in color_map:

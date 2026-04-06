@@ -2,9 +2,8 @@
 
 ## Recommended machine prerequisites
 - Windows 10 or Windows 11
-- Python 3.11 or newer
 - Internet connection for `pip install`
-- `winget` if you want the setup script to auto-install Tesseract
+- `winget` if you want the setup script to auto-install Python or Tesseract
 - Tesseract OCR only if you need `icici` statement support
 
 ## Fastest setup on a new machine
@@ -20,6 +19,7 @@
    ```
 
 If the folder was copied from another machine, the installer will automatically rebuild a stale `.venv`.
+If Python is missing and `winget` is available, the installer will try to install Python 3.11 automatically.
 
 ## Create a clean package to share with another machine
 Run this on the source machine:
@@ -46,6 +46,8 @@ If you want to include PDFs in the package:
 ```
 
 ## What the setup script does
+- Finds a usable Python 3.11+ install and ignores the Microsoft Store `python.exe` alias in `WindowsApps`
+- Installs Python 3.11 with `winget` if Python is missing and `winget` is available
 - Creates `.venv`
 - Recreates `.venv` automatically if it was copied from another machine and still points to an old Python path
 - Upgrades `pip`
@@ -65,9 +67,15 @@ You can skip the OCR step:
 If you prefer doing it yourself:
 
 ```powershell
-python -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+If `py` is not available yet, install Python 3.11 first:
+
+```powershell
+winget install --id Python.Python.3.11 -e --accept-package-agreements --accept-source-agreements
 ```
 
 If you need ICICI support and Tesseract is not installed, install it manually or use `winget`:
@@ -136,8 +144,10 @@ Kotak:
 
 ## Troubleshooting
 If `python` is not recognized:
-- Reinstall Python and enable `Add python.exe to PATH`
-- Or use the `py` launcher command on Windows
+- The Microsoft Store alias may be taking over `python.exe`
+- Run `py -3 --version`; if that works, rerun `.\install_new_machine.bat`
+- Otherwise install Python 3.11 from python.org with `Add python.exe to PATH`, or use:
+  `winget install --id Python.Python.3.11 -e --accept-package-agreements --accept-source-agreements`
 
 If ICICI fails on the new machine:
 - Check that `tesseract.exe` exists

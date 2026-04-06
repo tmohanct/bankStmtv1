@@ -44,18 +44,208 @@ function Read-PyVenvConfig {
     return $config
 }
 
+function Get-InstalledPythonExeCandidates {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+
+    $registryRoots = @(
+        'HKCU:\Software\Python\PythonCore',
+        'HKLM:\Software\Python\PythonCore',
+        'HKLM:\Software\WOW6432Node\Python\PythonCore'
+    )
+
+    foreach ($root in $registryRoots) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+
+        foreach ($versionKey in Get-ChildItem $root -ErrorAction SilentlyContinue) {
+            $installPathKey = Join-Path $versionKey.PSPath 'InstallPath'
+            if (-not (Test-Path $installPathKey)) {
+                continue
+            }
+
+            try {
+                $installKey = Get-Item $installPathKey -ErrorAction Stop
+            }
+            catch {
+                continue
+            }
+
+            $defaultDir = $installKey.GetValue('')
+            if ($defaultDir) {
+                $pythonExe = Join-Path $defaultDir 'python.exe'
+                if ((Test-Path $pythonExe) -and $seen.Add($pythonExe)) {
+                    [void]$candidates.Add($pythonExe)
+                }
+            }
+
+            $executablePath = $installKey.GetValue('ExecutablePath')
+            if ($executablePath -and (Test-Path $executablePath) -and $seen.Add($executablePath)) {
+                [void]$candidates.Add($executablePath)
+            }
+        }
+    }
+
+    return $candidates.ToArray()
+}
+
+function Test-PythonCommand {
+    param([string[]]$Command)
+
+    $exePath = $Command[0]
+
+    if ($exePath -match '\\WindowsApps\\python(?:3(?:\.\d+)?)?\.exe$') {
+        return [pscustomobject]@{
+            Usable = $false
+            IsStoreAlias = $true
+            Reason = 'Found the Microsoft Store alias instead of a real Python install.'
+            VersionText = ''
+        }
+    }
+
+    if ($Command.Count -gt 1) {
+        $args = @($Command[1..($Command.Count - 1)] + @('--version'))
+    }
+    else {
+        $args = @('--version')
+    }
+
+    try {
+        $output = & $exePath @args 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        return [pscustomobject]@{
+            Usable = $false
+            IsStoreAlias = $false
+            Reason = $_.Exception.Message
+            VersionText = ''
+        }
+    }
+
+    if ($exitCode -ne 0) {
+        $firstLine = @($output)[0]
+        $reason = if ($firstLine) { [string]$firstLine } else { "Exit code $exitCode" }
+        return [pscustomobject]@{
+            Usable = $false
+            IsStoreAlias = $false
+            Reason = $reason.Trim()
+            VersionText = ''
+        }
+    }
+
+    $versionText = [string](@($output)[0])
+    $versionText = $versionText.Trim()
+    if ($versionText -notmatch '^Python\s+(\d+)\.(\d+)') {
+        return [pscustomobject]@{
+            Usable = $false
+            IsStoreAlias = $false
+            Reason = "Unexpected version output: $versionText"
+            VersionText = $versionText
+        }
+    }
+
+    $major = [int]$matches[1]
+    $minor = [int]$matches[2]
+    if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 11)) {
+        return [pscustomobject]@{
+            Usable = $false
+            IsStoreAlias = $false
+            Reason = "Python 3.11 or newer is required. Found $versionText."
+            VersionText = $versionText
+        }
+    }
+
+    return [pscustomobject]@{
+        Usable = $true
+        IsStoreAlias = $false
+        Reason = ''
+        VersionText = $versionText
+    }
+}
+
 function Get-PythonLauncher {
-    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($pythonCmd) {
-        return @($pythonCmd.Source)
+    param([switch]$AllowMissing)
+
+    $candidateCommands = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $sawStoreAlias = $false
+
+    function Add-PythonCandidate {
+        param([string[]]$Command)
+
+        $key = $Command -join "`0"
+        if ($seen.Add($key)) {
+            [void]$candidateCommands.Add($Command)
+        }
     }
 
     $pyCmd = Get-Command py -ErrorAction SilentlyContinue
     if ($pyCmd) {
-        return @($pyCmd.Source, '-3')
+        Add-PythonCandidate @($pyCmd.Source, '-3')
     }
 
-    throw 'Python 3 was not found. Install Python 3.11 or newer and add it to PATH.'
+    foreach ($commandName in @('python', 'python3')) {
+        foreach ($command in @(Get-Command $commandName -All -ErrorAction SilentlyContinue)) {
+            if ($command.Source) {
+                Add-PythonCandidate @($command.Source)
+            }
+        }
+    }
+
+    foreach ($candidatePath in Get-InstalledPythonExeCandidates) {
+        Add-PythonCandidate @($candidatePath)
+    }
+
+    foreach ($candidate in $candidateCommands) {
+        $result = Test-PythonCommand -Command $candidate
+        if ($result.Usable) {
+            return $candidate
+        }
+
+        if ($result.IsStoreAlias) {
+            $sawStoreAlias = $true
+        }
+    }
+
+    if ($AllowMissing) {
+        return $null
+    }
+
+    if ($sawStoreAlias) {
+        throw 'Python 3.11 or newer is not installed. Windows only found the Microsoft Store python alias.'
+    }
+
+    throw 'Python 3.11 or newer was not found. Install it and add it to PATH, or install the Windows py launcher.'
+}
+
+function Ensure-PythonLauncher {
+    $pythonLauncher = Get-PythonLauncher -AllowMissing
+    if ($pythonLauncher) {
+        return $pythonLauncher
+    }
+
+    $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
+    if ($wingetCmd) {
+        Write-Host 'Python 3.11+ was not found. Installing Python 3.11 with winget.'
+        Invoke-Checked @(
+            $wingetCmd.Source,
+            'install',
+            '--id',
+            'Python.Python.3.11',
+            '-e',
+            '--accept-package-agreements',
+            '--accept-source-agreements'
+        )
+
+        $pythonLauncher = Get-PythonLauncher -AllowMissing
+        if ($pythonLauncher) {
+            return $pythonLauncher
+        }
+    }
+
+    throw 'Python 3.11 or newer is required. Install it from python.org for Windows and rerun this setup script.'
 }
 
 function Get-VenvHealth {
@@ -144,7 +334,7 @@ function Get-TesseractPath {
 }
 
 Write-Host '==> Checking Python'
-$pythonLauncher = @(Get-PythonLauncher)
+$pythonLauncher = @(Ensure-PythonLauncher)
 Invoke-Checked (@($pythonLauncher) + @('--version'))
 
 $venvDir = Join-Path $repoRoot '.venv'
@@ -231,7 +421,7 @@ Invoke-Checked (@($venvPython, '-m', 'py_compile') + $pythonFiles)
 Write-Host ''
 Write-Host 'Setup complete.'
 Write-Host 'Use these commands from the repo root:'
-Write-Host '.\install_fresh_machine.bat'
+Write-Host '.\install_new_machine.bat'
 Write-Host '.\run_bank_parser.bat --bank sbi --file sbi.pdf'
 Write-Host '.\run_bank_parser.bat --bank axis --file "axis.pdf;axis2.pdf"'
 Write-Host ''

@@ -39,6 +39,18 @@ def _clean_detail_key(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", _clean_text(value))
 
 
+def _extract_statement_date(value: str) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+
+    match = re.search(r"\b\d{2}-\d{2}-\d{4}\b", text)
+    if match:
+        return match.group(0)
+
+    return ""
+
+
 def _parse_signed_amount(value: str) -> float | None:
     text = _clean_text(value)
     if not text:
@@ -69,6 +81,24 @@ def _split_debit_credit(amount_text: str) -> tuple[float | None, float | None]:
     return None, abs(amount)
 
 
+def _build_details(remarks: str, tran_id: str, utr_number: str, instr_id: str) -> str:
+    parts: list[str] = []
+    for value in (remarks, tran_id, utr_number, instr_id):
+        cleaned = _clean_text(value)
+        if not cleaned or cleaned == "-":
+            continue
+        parts.append(cleaned)
+    return " ".join(parts)
+
+
+def _select_cheque_number(tran_id: str, instr_id: str) -> str:
+    for value in (instr_id, tran_id):
+        cleaned = _clean_text(value)
+        if cleaned and cleaned != "-":
+            return cleaned
+    return ""
+
+
 def parse_unionbank_records(
     pdf_path: str | Path,
     logger: logging.Logger,
@@ -85,25 +115,32 @@ def parse_unionbank_records(
             for table in tables:
                 for raw_row in table:
                     row = [_clean_text(cell) for cell in raw_row]
-                    if len(row) < 5:
+                    if len(row) < 8:
                         continue
 
-                    date_text, transaction_id, remarks, amount_text, balance_text = row[:5]
-                    if not DATE_RE.match(date_text):
+                    date_text, remarks, transaction_id, utr_number, instr_id, withdrawals_text, deposits_text, balance_text = row[:8]
+                    statement_date = _extract_statement_date(date_text)
+                    if not DATE_RE.match(statement_date):
                         continue
 
-                    debit, credit = _split_debit_credit(amount_text)
+                    debit = _parse_signed_amount(withdrawals_text)
+                    credit = _parse_signed_amount(deposits_text)
                     balance = _parse_signed_amount(balance_text)
-                    details = _clean_text(f"{transaction_id} {remarks}")
+                    details = _build_details(
+                        remarks=remarks,
+                        tran_id=transaction_id,
+                        utr_number=utr_number,
+                        instr_id=instr_id,
+                    )
                     if not details or balance is None or (debit is None and credit is None):
                         continue
 
                     record = {
                         "Sno": 0,
-                        "Date": _normalize_output_date(date_text),
+                        "Date": _normalize_output_date(statement_date),
                         "Details": details,
                         "Detail_Clean": _clean_detail_key(details),
-                        "Cheque No": "",
+                        "Cheque No": _select_cheque_number(transaction_id, instr_id),
                         "Debit": debit,
                         "Credit": credit,
                         "Balance": balance,
