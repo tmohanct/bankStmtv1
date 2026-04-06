@@ -22,9 +22,10 @@ from final_excel_builder import (
 
 
 class MonthDrCrSheetTests(unittest.TestCase):
-    def test_format_month_dr_cr_chart_label_uses_k_and_l_suffixes(self) -> None:
-        self.assertEqual(_format_month_dr_cr_chart_label(3600), "3.6k")
-        self.assertEqual(_format_month_dr_cr_chart_label(130000), "1.3L")
+    def test_format_month_dr_cr_chart_label_uses_k_l_and_cr_suffixes(self) -> None:
+        self.assertEqual(_format_month_dr_cr_chart_label(3600), "3.6 k")
+        self.assertEqual(_format_month_dr_cr_chart_label(130000), "1.3 L")
+        self.assertEqual(_format_month_dr_cr_chart_label(28930000), "2.89 Cr")
         self.assertEqual(_format_month_dr_cr_chart_label(950), "950.0")
         self.assertEqual(_format_month_dr_cr_chart_label(None), "")
 

@@ -13,5 +13,4 @@ git push origin main
 git clone https://github.com/tmohanct/bankStmtv1.git
 
 
-
 git pull origin main

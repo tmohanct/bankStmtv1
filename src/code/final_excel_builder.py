@@ -54,8 +54,8 @@ THIN_BORDER = Border(
 )
 MONTH_DR_CR_FOOTNOTE = "#.OF Dr/Cr & Avg takes only amount Greater than 30. Less than 30 not counted."
 MONTH_DR_CR_CHART_IMAGE_SIZE = (1120, 520)
-MONTH_DR_CR_DATA_LABEL_FONT_SIZE = 11
-MONTH_DR_CR_EXCEL_DATA_LABEL_FONT_SIZE = 10
+MONTH_DR_CR_DATA_LABEL_FONT_SIZE = 13
+MONTH_DR_CR_EXCEL_DATA_LABEL_FONT_SIZE = 12
 C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -715,10 +715,12 @@ def _format_month_dr_cr_chart_label(value: Any) -> str:
         return ""
 
     absolute = abs(numeric)
+    if absolute >= 10000000:
+        return f"{numeric / 10000000:.2f} Cr"
     if absolute >= 100000:
-        return f"{numeric / 100000:.1f}L"
+        return f"{numeric / 100000:.1f} L"
     if absolute >= 1000:
-        return f"{numeric / 1000:.1f}k"
+        return f"{numeric / 1000:.1f} k"
     return f"{numeric:.1f}"
 
 
@@ -1095,11 +1097,14 @@ def _try_apply_excel_chart_postprocess(final_path: Path, sheet_name: str, logger
 
         function Get-CompactLabel([double]$Value) {
             $absolute = [Math]::Abs($Value)
+            if ($absolute -ge 10000000) {
+                return ('{0:0.00} Cr' -f ($Value / 10000000.0))
+            }
             if ($absolute -ge 100000) {
-                return ('{0:0.0}L' -f ($Value / 100000.0))
+                return ('{0:0.0} L' -f ($Value / 100000.0))
             }
             if ($absolute -ge 1000) {
-                return ('{0:0.0}k' -f ($Value / 1000.0))
+                return ('{0:0.0} k' -f ($Value / 1000.0))
             }
             return ('{0:0.0}' -f $Value)
         }
