@@ -94,10 +94,66 @@ class KVBParserUnitTests(unittest.TestCase):
         self.assertEqual(record["Balance"], 12500.0)
         self.assertEqual(next_balance, 12500.0)
 
+    def test_parse_tokenized_row_with_month_date_and_explicit_debit_credit_columns(self) -> None:
+        parsed = kvb_parser._parse_tokenized_text_row(
+            [
+                "29-SEP-2025",
+                "06:17:46",
+                "29-SEP-2025",
+                "IMPS-527206487277-VODAFONE IDEA",
+                "LTD-YESB-xxxxxxxxxxx6186-sa",
+                "-",
+                "1,000.00",
+                "0.00",
+                "200.00",
+            ]
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.date_text, "29-SEP-2025")
+        self.assertEqual(parsed.body_text, "IMPS-527206487277-VODAFONE IDEA LTD-YESB-xxxxxxxxxxx6186-sa")
+        self.assertEqual(parsed.debit_text, "1,000.00")
+        self.assertEqual(parsed.credit_text, "0.00")
+        self.assertEqual(parsed.balance_text, "200.00")
+
+        record, next_balance = kvb_parser._finalize_record(parsed, 1200.0, kvb_parser.OCR_DATE_FORMATS)
+        self.assertEqual(record["Date"], "29/09/2025")
+        self.assertEqual(record["Debit"], 1000.0)
+        self.assertIsNone(record["Credit"])
+        self.assertEqual(record["Balance"], 200.0)
+        self.assertEqual(next_balance, 200.0)
+
+    def test_parse_tokenized_row_accepts_leading_decimal_balance(self) -> None:
+        parsed = kvb_parser._parse_tokenized_text_row(
+            [
+                "23-OCT-2025",
+                "06:56:34",
+                "23-OCT-2025",
+                "MB-WITHIN-DR:XXXX0397-",
+                "CR:XXXX8895-942508231025794809",
+                "-",
+                "749.00",
+                "0.00",
+                ".24",
+            ]
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+
+        record, next_balance = kvb_parser._finalize_record(parsed, 749.24, kvb_parser.OCR_DATE_FORMATS)
+        self.assertEqual(record["Date"], "23/10/2025")
+        self.assertEqual(record["Debit"], 749.0)
+        self.assertIsNone(record["Credit"])
+        self.assertEqual(record["Balance"], 0.24)
+        self.assertEqual(next_balance, 0.24)
+
     def test_tokenized_row_start_detection_accepts_split_rows(self) -> None:
         self.assertTrue(kvb_parser._looks_like_tokenized_row_start("02/04/2026", "10:22:11"))
         self.assertTrue(kvb_parser._looks_like_tokenized_row_start("02/04/2026", "02/04/2026"))
         self.assertTrue(kvb_parser._looks_like_tokenized_row_start("02-04-2026 10:22:11", ""))
+        self.assertTrue(kvb_parser._looks_like_tokenized_row_start("29-SEP-2025", "06:15:14"))
         self.assertFalse(kvb_parser._looks_like_tokenized_row_start("IMPS-TRANSFER", "2,500.00"))
 
     def test_tokenized_parser_drops_page_header_and_summary_carryover(self) -> None:
@@ -177,6 +233,74 @@ class KVBParserUnitTests(unittest.TestCase):
         self.assertEqual(records[2]["Details"], "IMPS CHARGES")
         self.assertEqual(records[2]["Debit"], 5.9)
         self.assertEqual(records[2]["Balance"], 127.98)
+
+    def test_tokenized_parser_handles_uppercase_headers_and_brought_forward_rows(self) -> None:
+        class FakePage:
+            def __init__(self, text: str) -> None:
+                self._text = text
+
+            def get_text(self, mode: str) -> str:
+                self.mode = mode
+                return self._text
+
+        class FakeDocument(list):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        page_1 = "\n".join(
+            [
+                "ACCOUNT STATEMENT",
+                "Txn Date",
+                "Value Date",
+                "Particulars",
+                "Ref. No.",
+                "Debit",
+                "Credit",
+                "Balance",
+                "29-SEP-2025",
+                "29-SEP-2025",
+                "B/F...",
+                "-",
+                "-",
+                "-",
+                "0.00",
+                "29-SEP-2025",
+                "06:15:14",
+                "29-SEP-2025",
+                "UPI-CR-527223189379-ENAYATHULLA",
+                "S-KVBL-1708155000018895-UPI",
+                "527223189379",
+                "0.00",
+                "1,000.00",
+                "1,000.00",
+                "1",
+                "ACCOUNT SUMMARY",
+                "Current Balance",
+                "1,000.00",
+                "Note: This is a computer-generated report and does not require signature.",
+            ]
+        )
+
+        logger = logging.getLogger("tests.kvb.uppercase")
+        logger.handlers.clear()
+        logger.addHandler(logging.NullHandler())
+
+        with patch.object(
+            kvb_parser.fitz,
+            "open",
+            return_value=FakeDocument([FakePage(page_1)]),
+        ):
+            records = kvb_parser._parse_tokenized_text_statement("dummy.pdf", logger)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["Date"], "29/09/2025")
+        self.assertEqual(records[0]["Details"], "UPI-CR-527223189379-ENAYATHULLA S-KVBL-1708155000018895-UPI")
+        self.assertIsNone(records[0]["Debit"])
+        self.assertEqual(records[0]["Credit"], 1000.0)
+        self.assertEqual(records[0]["Balance"], 1000.0)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ OCR_ROW_RE = re.compile(
     r"(?P<balance>-?[0-9,]+\.\d{2}[\]\)\}]?)$"
 )
 OPENING_BALANCE_RE = re.compile(r"Opening Balance.*?(-?[0-9,]+\.\d{2})")
-OCR_DATE_FORMATS = ("%d-%m-%Y", "%d/%m/%Y")
+OCR_DATE_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y")
 TEXT_DATE_FORMATS = ("%d/%m/%y",)
 TEXT_ROW_RE = re.compile(
     r"^(?P<date>\d{2}/\d{2}/\d{2})\s+"
@@ -33,11 +33,14 @@ TEXT_ROW_RE = re.compile(
 )
 TEXT_AMOUNT_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{2,3})*|\d+)?\.\d{2}")
 TEXT_DETECTION_MIN_ROWS = 3
-TOKENIZED_TEXT_ROW_START_RE = re.compile(r"^\d{2}[-/]\d{2}[-/]\d{4}\s+\d{2}:\d{2}(?::\d{2})?$")
-TOKENIZED_TEXT_DATE_RE = re.compile(r"^\d{2}[-/]\d{2}[-/]\d{4}$")
+TOKENIZED_TEXT_ROW_START_RE = re.compile(
+    r"^\d{2}(?:[-/]\d{2}[-/]\d{4}|-[A-Za-z]{3}-\d{4})\s+\d{2}:\d{2}(?::\d{2})?$",
+    re.IGNORECASE,
+)
+TOKENIZED_TEXT_DATE_RE = re.compile(r"^\d{2}(?:[-/]\d{2}[-/]\d{4}|-[A-Za-z]{3}-\d{4})$", re.IGNORECASE)
 TOKENIZED_TEXT_TIME_RE = re.compile(r"^\d{2}:\d{2}(?::\d{2})?$")
 TOKENIZED_TEXT_AMOUNT_RE = re.compile(
-    r"^-?\(?[0-9,]+\.\d{2}\)?(?:CR|DR|MR|[\]\)\}])?$",
+    r"^-?\(?(?:\d{1,3}(?:,\d{2,3})*|\d+)?\.\d{2}\)?(?:CR|DR|MR|[\]\)\}])?$",
     re.IGNORECASE,
 )
 OCR_FOOTER_PREFIXES = ("Page No.",)
@@ -84,24 +87,32 @@ DEBIT_HINTS = (
     "FT - DR",
     "FT -100",
 )
-TOKENIZED_TEXT_BREAK_PREFIXES = (
-    "Karur Vysya Bank does not ask",
-    "Never disclose your passwords",
-    "Account Statement",
-    "THE KARUR VYSYA BANK LTD.",
-    "Acc.No.",
-    "Customer ID",
-    "Acc.Type",
-    "St.Date",
-    "St.Period",
-    "Mobile No.",
-    "Email Id",
-    "Account Summary",
-    "Opening Balance",
-    "Total Credit Amount",
-    "Total Debit Amount",
-    "Closing Balance",
-    "Count of Cr. & Dr. Transactions",
+TOKENIZED_TEXT_BREAK_PREFIXES = tuple(
+    prefix.upper()
+    for prefix in (
+        "Karur Vysya Bank does not ask",
+        "Never disclose your passwords",
+        "Account Statement",
+        "THE KARUR VYSYA BANK LTD.",
+        "Acc.No.",
+        "Customer ID",
+        "Acc.Type",
+        "St.Date",
+        "St.Period",
+        "Mobile No.",
+        "Email Id",
+        "Account Summary",
+        "Current Balance",
+        "Opening Balance",
+        "Total Credit Amount",
+        "Total Debit Amount",
+        "Closing Balance",
+        "Count of Cr. & Dr. Transactions",
+        "Note:",
+        "Statements are sent to customers",
+        "Unless the constituent notifies the bank immediately",
+        "We would like to reiterate",
+    )
 )
 KVB_CHEQUE_HINT_RE = re.compile(r"\b(?:CHQ|CHEQ(?:UE)?|CLG|CLEARING|CTS|RETURN)\b", re.IGNORECASE)
 KVB_CHEQUE_TRAILER_RE = re.compile(r"^(?P<details>.+?)\s+(?P<cheque>0\d{5,}|\d{6,})$")
@@ -113,6 +124,8 @@ class PendingRecord:
     body_text: str
     amount_text: str
     balance_text: str
+    debit_text: str = ""
+    credit_text: str = ""
     continuation_lines: list[str] = field(default_factory=list)
     cheque_no: str = ""
 
@@ -196,6 +209,21 @@ def _extract_trailing_cheque_no(body_text: str) -> tuple[str, str]:
     return clean_cell(match.group("details")), cheque_no
 
 
+def _is_tokenized_text_date(value: str) -> bool:
+    return bool(TOKENIZED_TEXT_DATE_RE.match(clean_cell(value)))
+
+
+def _is_tokenized_text_amount(value: str) -> bool:
+    return bool(TOKENIZED_TEXT_AMOUNT_RE.match(clean_cell(value)))
+
+
+def _is_tokenized_text_value(value: str) -> bool:
+    text = clean_cell(value)
+    if not text:
+        return False
+    return text == "-" or _is_tokenized_text_amount(text)
+
+
 def _classify_amount(
     details: str,
     amount_value: float,
@@ -227,7 +255,15 @@ def _finalize_record(
 
     debit: float | None = None
     credit: float | None = None
-    if amount_value is not None and balance_value is not None:
+    if pending.debit_text or pending.credit_text:
+        debit = parse_amount(pending.debit_text)
+        credit = parse_amount(pending.credit_text)
+
+        if debit is not None and abs(debit) <= 0.005:
+            debit = None
+        if credit is not None and abs(credit) <= 0.005:
+            credit = None
+    elif amount_value is not None and balance_value is not None:
         debit, credit = _classify_amount(details_text, amount_value, balance_value, previous_balance)
 
     record = build_record(
@@ -243,6 +279,13 @@ def _finalize_record(
     return record, next_balance
 
 
+def _is_opening_balance_pending(pending: PendingRecord) -> bool:
+    details_text = clean_cell(" ".join([pending.body_text, *pending.continuation_lines])).upper()
+    if not details_text:
+        return False
+    return details_text.startswith("B/F") or details_text.startswith("OPENING BALANCE")
+
+
 def _finalize_tokenized_pending_record(
     current_row_lines: list[str],
     records: list[dict[str, Any]],
@@ -256,6 +299,10 @@ def _finalize_tokenized_pending_record(
     if parsed is None:
         return [], previous_balance
 
+    if _is_opening_balance_pending(parsed):
+        next_balance = parse_amount(parsed.balance_text)
+        return [], next_balance if next_balance is not None else previous_balance
+
     record, next_balance = _finalize_record(parsed, previous_balance, OCR_DATE_FORMATS)
     records.append(record)
     if progress_cb is not None:
@@ -264,21 +311,25 @@ def _finalize_tokenized_pending_record(
 
 
 def _looks_like_tokenized_row_start(line: str, next_line: str = "") -> bool:
+    line = clean_cell(line)
+    next_line = clean_cell(next_line)
     if TOKENIZED_TEXT_ROW_START_RE.match(line):
         return True
-    if not TOKENIZED_TEXT_DATE_RE.match(line):
+    if not _is_tokenized_text_date(line):
         return False
-    return bool(TOKENIZED_TEXT_TIME_RE.match(next_line) or TOKENIZED_TEXT_DATE_RE.match(next_line))
+    return bool(TOKENIZED_TEXT_TIME_RE.match(next_line) or _is_tokenized_text_date(next_line))
 
 
 def _is_tokenized_text_break_line(line: str) -> bool:
-    if not line:
+    normalized_line = clean_cell(line)
+    if not normalized_line:
         return True
-    if line.startswith("Page No.") or line.lower().startswith("page :"):
+    upper_line = normalized_line.upper()
+    if upper_line.startswith("PAGE NO.") or upper_line.startswith("PAGE :"):
         return True
-    if re.fullmatch(r"Page \d+ of \d+", line, flags=re.IGNORECASE):
+    if re.fullmatch(r"Page \d+ of \d+", normalized_line, flags=re.IGNORECASE):
         return True
-    return any(line.startswith(prefix) for prefix in TOKENIZED_TEXT_BREAK_PREFIXES)
+    return any(upper_line.startswith(prefix) for prefix in TOKENIZED_TEXT_BREAK_PREFIXES)
 
 
 def _parse_ocr_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
@@ -526,7 +577,7 @@ def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
     if TOKENIZED_TEXT_ROW_START_RE.match(normalized_lines[0]):
         date_text = normalized_lines[0].split()[0]
         cursor = 1
-    elif TOKENIZED_TEXT_DATE_RE.match(normalized_lines[0]):
+    elif _is_tokenized_text_date(normalized_lines[0]):
         date_text = normalized_lines[0]
         cursor = 1
         if cursor < len(normalized_lines) and TOKENIZED_TEXT_TIME_RE.match(normalized_lines[cursor]):
@@ -534,14 +585,38 @@ def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
     else:
         return None
 
-    if cursor >= len(normalized_lines) or not TOKENIZED_TEXT_DATE_RE.match(normalized_lines[cursor]):
+    if cursor >= len(normalized_lines) or not _is_tokenized_text_date(normalized_lines[cursor]):
         return None
     cursor += 1
+
+    remaining_parts = normalized_lines[cursor:]
+    if len(remaining_parts) >= 4 and all(_is_tokenized_text_value(value) for value in remaining_parts[-3:]):
+        body_parts = [part for part in remaining_parts[:-4] if clean_cell(part)]
+        if body_parts and body_parts[0].isdigit() and len(body_parts[0]) <= 4:
+            body_parts.pop(0)
+
+        cheque_no = ""
+        if body_parts and re.fullmatch(r"\d{6,}", body_parts[0]):
+            cheque_no = body_parts.pop(0)
+
+        body_text = clean_cell(" ".join(body_parts))
+        if not cheque_no:
+            body_text, cheque_no = _extract_trailing_cheque_no(body_text)
+
+        return PendingRecord(
+            date_text=date_text,
+            body_text=body_text,
+            amount_text="",
+            debit_text=remaining_parts[-3],
+            credit_text=remaining_parts[-2],
+            balance_text=remaining_parts[-1],
+            cheque_no=cheque_no,
+        )
 
     amount_positions = [
         idx
         for idx, value in enumerate(normalized_lines[cursor:], start=cursor)
-        if TOKENIZED_TEXT_AMOUNT_RE.match(value)
+        if _is_tokenized_text_amount(value)
     ]
     if len(amount_positions) < 2:
         return None
@@ -591,6 +666,12 @@ def _parse_tokenized_text_statement(pdf_path: str, logger, progress_cb=None) -> 
         if parsed is None:
             return
 
+        if _is_opening_balance_pending(parsed):
+            next_balance = parse_amount(parsed.balance_text)
+            if next_balance is not None:
+                previous_balance = next_balance
+            return
+
         record, previous_balance_local = _finalize_record(parsed, previous_balance, OCR_DATE_FORMATS)
         previous_balance = previous_balance_local
         records.append(record)
@@ -615,6 +696,10 @@ def _parse_tokenized_text_statement(pdf_path: str, logger, progress_cb=None) -> 
                 if _looks_like_tokenized_row_start(line, next_line):
                     finalize_current_row()
                     current_row_lines = [line]
+                    continue
+
+                if current_row_lines and line.isdigit() and line == str(page_idx):
+                    finalize_current_row()
                     continue
 
                 if _is_tokenized_text_break_line(line):
