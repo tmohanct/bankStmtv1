@@ -302,6 +302,142 @@ class KVBParserUnitTests(unittest.TestCase):
         self.assertEqual(records[0]["Credit"], 1000.0)
         self.assertEqual(records[0]["Balance"], 1000.0)
 
+    def test_ocr_parser_splits_rows_with_ocr_punctuation_noise(self) -> None:
+        class FakePage:
+            def __init__(self, text: str) -> None:
+                self._text = text
+
+        class FakeDocument(list):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        page_112 = "\n".join(
+            [
+                "30-01-2026 11:20:44 30-01-2026 | 1763 IMPS-603011766230-SKPLANNERS. 50,000.00 2,338.75}",
+                "AND ASSOCIATES-INDB-",
+                "XXXXXXXX5555-Y ANNAIKKAL CHIT",
+                "PAYMENT",
+                "Page No. 112",
+            ]
+        )
+        page_113 = "\n".join(
+            [
+                "30-01-2026 18:51:36 30-01-2026 | 1763 IMPS-603018300866-SAI 1,00,000.00 1,02,338.75}",
+                "KARTHICK ENTERPRISES-",
+                "XxXXXXxX9161-Repayment",
+                "30-01-2026 18:55:57 30-01-2026 | 2101 KVBLH00253837785- DE NOBILI 1,00,000.00) 2,338.75}",
+                "HR SEC SCHOOL-408461073-",
+                "PAYMENT RETURN",
+                "31-01-2026 10:33:47 31-01-2026 | 2101 NEFT CR-HDFC0000001-SAI 4,50,000.00 4,52,338.75|",
+                "KARTHICK ENTERPRISES-Sai",
+                "Karthick planners and associates-",
+                "HDFCH00769268380",
+                "31-01-2026 11:31:16 31-01-2026 | 2101 KVBLH00253860868- 1,00,000.00 3,52,338.75|",
+                "N.RAMESH-50100271033149-EMI",
+                "PURPOSE",
+            ]
+        )
+
+        logger = logging.getLogger("tests.kvb.ocr")
+        logger.handlers.clear()
+        logger.addHandler(logging.NullHandler())
+
+        with patch.object(kvb_parser, "_configure_tesseract", return_value="tesseract.exe"):
+            with patch.object(kvb_parser, "_render_page_text", side_effect=lambda page: page._text):
+                with patch.object(
+                    kvb_parser.fitz,
+                    "open",
+                    return_value=FakeDocument([FakePage(page_112), FakePage(page_113)]),
+                ):
+                    records = kvb_parser._parse_ocr_statement("dummy.pdf", logger)
+
+        self.assertEqual(len(records), 5)
+        self.assertEqual(sum(row["Date"] == "30/01/2026" for row in records), 3)
+
+        self.assertEqual(
+            records[1]["Details"],
+            "IMPS-603018300866-SAI KARTHICK ENTERPRISES- XxXXXXxX9161-Repayment",
+        )
+        self.assertIsNone(records[1]["Debit"])
+        self.assertEqual(records[1]["Credit"], 100000.0)
+        self.assertEqual(records[1]["Balance"], 102338.75)
+
+        self.assertEqual(
+            records[2]["Details"],
+            "KVBLH00253837785- DE NOBILI HR SEC SCHOOL-408461073- PAYMENT RETURN",
+        )
+        self.assertEqual(records[2]["Debit"], 100000.0)
+        self.assertIsNone(records[2]["Credit"])
+        self.assertEqual(records[2]["Balance"], 2338.75)
+
+        self.assertEqual(
+            records[3]["Details"],
+            "NEFT CR-HDFC0000001-SAI KARTHICK ENTERPRISES-Sai Karthick planners and associates- HDFCH00769268380",
+        )
+        self.assertIsNone(records[3]["Debit"])
+        self.assertEqual(records[3]["Credit"], 450000.0)
+        self.assertEqual(records[3]["Balance"], 452338.75)
+
+        self.assertEqual(
+            records[4]["Details"],
+            "KVBLH00253860868- N.RAMESH-50100271033149-EMI PURPOSE",
+        )
+        self.assertEqual(records[4]["Debit"], 100000.0)
+        self.assertIsNone(records[4]["Credit"])
+        self.assertEqual(records[4]["Balance"], 352338.75)
+
+    def test_ocr_parser_falls_back_to_value_date_when_txn_date_is_ocr_corrupted(self) -> None:
+        class FakePage:
+            def __init__(self, text: str) -> None:
+                self._text = text
+
+        class FakeDocument(list):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        page_text = "\n".join(
+            [
+                "41-11-2025 14:42:41 11-11-2025 | 2101 KVBLH00248205479- 53,000.00 52,477.33]",
+                "GURUSAMY-40569019245-DGL",
+                "STAFF SALARY",
+                "47-11-2025 17:16:03 17-11-2025 | 2101 KVBLH00248621099- 15,000.00 11,261.89]",
+                "VETRIVELMURUGAN-27660200000.",
+                "CEMENT PAYMENT",
+                "18-11-2025 10:26:59 18-11-2025] 1865 000000000000 | CASH DEP-TP-K ANNAMALAI- 20,000.00 31,261.89]",
+                "KOVILOOR",
+            ]
+        )
+
+        logger = logging.getLogger("tests.kvb.ocr-date")
+        logger.handlers.clear()
+        logger.addHandler(logging.NullHandler())
+
+        with patch.object(kvb_parser, "_configure_tesseract", return_value="tesseract.exe"):
+            with patch.object(kvb_parser, "_render_page_text", side_effect=lambda page: page._text):
+                with patch.object(
+                    kvb_parser.fitz,
+                    "open",
+                    return_value=FakeDocument([FakePage(page_text)]),
+                ):
+                    records = kvb_parser._parse_ocr_statement("dummy.pdf", logger)
+
+        self.assertEqual(len(records), 3)
+        self.assertEqual(records[0]["Date"], "11/11/2025")
+        self.assertEqual(records[0]["Details"], "KVBLH00248205479- GURUSAMY-40569019245-DGL STAFF SALARY")
+        self.assertEqual(records[0]["Debit"], 53000.0)
+        self.assertEqual(records[1]["Date"], "17/11/2025")
+        self.assertEqual(records[1]["Details"], "KVBLH00248621099- VETRIVELMURUGAN-27660200000. CEMENT PAYMENT")
+        self.assertEqual(records[1]["Debit"], 15000.0)
+        self.assertEqual(records[2]["Date"], "18/11/2025")
+        self.assertEqual(records[2]["Details"], "CASH DEP-TP-K ANNAMALAI- KOVILOOR")
+        self.assertEqual(records[2]["Credit"], 20000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

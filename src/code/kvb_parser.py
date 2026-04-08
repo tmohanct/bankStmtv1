@@ -11,17 +11,20 @@ import fitz
 import pytesseract
 from PIL import Image
 
-from parser_helpers import build_record
+from parser_helpers import build_record, normalize_date_with_formats
 from utils import clean_cell, parse_amount
 
 RENDER_ZOOM = 2.0
+OCR_AMOUNT_TOKEN_PATTERN = r"-?\(?(?:\d{1,3}(?:,\d{2,3})*|\d+)?\.\d{2}\)?(?:CR|DR|MR|[\]\)\}\|])?"
+OCR_DATE_TOKEN_PATTERN = r"\d{2}-\d{2}-\d{4}"
+OCR_DATE_SUFFIX_PATTERN = r"[\]\)\}\|]?"
 OCR_ROW_RE = re.compile(
-    r"^(?P<date>\d{2}-\d{2}-\d{4})\s+"
+    rf"^(?P<date>{OCR_DATE_TOKEN_PATTERN}){OCR_DATE_SUFFIX_PATTERN}\s+"
     r"(?P<time>\d{2}:\d{2}:\d{2})\s+"
-    r"(?P<value_date>\d{2}-\d{2}-\d{4})\s+"
+    rf"(?P<value_date>{OCR_DATE_TOKEN_PATTERN}){OCR_DATE_SUFFIX_PATTERN}\s+"
     r"(?P<body>.+?)\s+"
-    r"(?P<amount>[0-9,]+\.\d{2})\s+"
-    r"(?P<balance>-?[0-9,]+\.\d{2}[\]\)\}]?)$"
+    rf"(?P<amount>{OCR_AMOUNT_TOKEN_PATTERN})\s+"
+    rf"(?P<balance>{OCR_AMOUNT_TOKEN_PATTERN})$"
 )
 OPENING_BALANCE_RE = re.compile(r"Opening Balance.*?(-?[0-9,]+\.\d{2})")
 OCR_DATE_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y")
@@ -40,7 +43,7 @@ TOKENIZED_TEXT_ROW_START_RE = re.compile(
 TOKENIZED_TEXT_DATE_RE = re.compile(r"^\d{2}(?:[-/]\d{2}[-/]\d{4}|-[A-Za-z]{3}-\d{4})$", re.IGNORECASE)
 TOKENIZED_TEXT_TIME_RE = re.compile(r"^\d{2}:\d{2}(?::\d{2})?$")
 TOKENIZED_TEXT_AMOUNT_RE = re.compile(
-    r"^-?\(?(?:\d{1,3}(?:,\d{2,3})*|\d+)?\.\d{2}\)?(?:CR|DR|MR|[\]\)\}])?$",
+    rf"^{OCR_AMOUNT_TOKEN_PATTERN}$",
     re.IGNORECASE,
 )
 OCR_FOOTER_PREFIXES = ("Page No.",)
@@ -124,6 +127,7 @@ class PendingRecord:
     body_text: str
     amount_text: str
     balance_text: str
+    value_date_text: str = ""
     debit_text: str = ""
     credit_text: str = ""
     continuation_lines: list[str] = field(default_factory=list)
@@ -244,6 +248,26 @@ def _classify_amount(
     return amount_value, None
 
 
+def _resolve_record_date(
+    date_text: str,
+    fallback_date_text: str,
+    date_formats: tuple[str, ...],
+) -> str:
+    primary = clean_cell(date_text)
+    if primary:
+        normalized_primary = normalize_date_with_formats(primary, date_formats)
+        if normalized_primary != primary:
+            return primary
+
+    fallback = clean_cell(fallback_date_text)
+    if fallback:
+        normalized_fallback = normalize_date_with_formats(fallback, date_formats)
+        if normalized_fallback != fallback:
+            return fallback
+
+    return primary or fallback
+
+
 def _finalize_record(
     pending: PendingRecord,
     previous_balance: float | None,
@@ -252,6 +276,7 @@ def _finalize_record(
     details_text = clean_cell(" ".join([pending.body_text, *pending.continuation_lines]))
     amount_value = parse_amount(pending.amount_text)
     balance_value = parse_amount(pending.balance_text)
+    record_date_text = _resolve_record_date(pending.date_text, pending.value_date_text, date_formats)
 
     debit: float | None = None
     credit: float | None = None
@@ -267,7 +292,7 @@ def _finalize_record(
         debit, credit = _classify_amount(details_text, amount_value, balance_value, previous_balance)
 
     record = build_record(
-        date_text=pending.date_text,
+        date_text=record_date_text,
         details=details_text,
         cheque_no=pending.cheque_no,
         debit=debit,
@@ -395,6 +420,7 @@ def _parse_ocr_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[s
                     details, cheque_no = _split_ocr_body(match.group("body"))
                     inline_pending = PendingRecord(
                         date_text=match.group("date"),
+                        value_date_text=match.group("value_date"),
                         body_text=details,
                         amount_text=match.group("amount"),
                         balance_text=match.group("balance"),
@@ -605,6 +631,7 @@ def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
 
         return PendingRecord(
             date_text=date_text,
+            value_date_text=normalized_lines[cursor - 1],
             body_text=body_text,
             amount_text="",
             debit_text=remaining_parts[-3],
@@ -642,6 +669,7 @@ def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
 
     return PendingRecord(
         date_text=date_text,
+        value_date_text=normalized_lines[cursor - 1],
         body_text=body_text,
         amount_text=amount_text,
         balance_text=balance_text,

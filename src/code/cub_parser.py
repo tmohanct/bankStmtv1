@@ -4,6 +4,26 @@ import pdfplumber
 
 from utils import clean_cell, clean_detail, is_date_token, normalize_date, parse_amount
 
+CUB_HEADER_DETAILS = {
+    "PARTICULARS",
+    "DESCRIPTION",
+}
+
+
+def _is_non_transaction_row(date_text: str, details_text: str) -> bool:
+    normalized_date = clean_cell(date_text).upper()
+    normalized_details = clean_cell(details_text).upper()
+
+    if normalized_date == "DATE":
+        return True
+    if normalized_details in CUB_HEADER_DETAILS:
+        return True
+    if normalized_details.startswith("TOTAL"):
+        return True
+    if normalized_details in {"END OF REPORT", "AMT BROUGHT FORWARD :"}:
+        return True
+    return False
+
 
 def _build_row(row: list[str]) -> dict[str, Any]:
     details = clean_cell(row[1]) if len(row) > 1 else ""
@@ -42,6 +62,9 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
                     date_text = row[0] if row else ""
                     details_text = row[1] if len(row) > 1 else ""
 
+                    if _is_non_transaction_row(date_text, details_text):
+                        continue
+
                     if is_date_token(date_text):
                         record = _build_row(row)
                         records.append(record)
@@ -49,7 +72,7 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
                             progress_cb(len(records))
                         continue
 
-                    if records and details_text and details_text.upper() != "DESCRIPTION":
+                    if records and details_text:
                         merged = f"{records[-1]['Details']} {details_text}".strip()
                         records[-1]["Details"] = merged
                         records[-1]["Detail_Clean"] = clean_detail(merged)

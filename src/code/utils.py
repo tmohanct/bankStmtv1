@@ -27,9 +27,15 @@ DATE_FORMATS = (
     "%d/%m/%y",
     "%d-%m-%y",
     "%Y-%m-%d",
+    "%d-%b-%Y",
+    "%d-%b-%y",
+    "%d-%B-%Y",
+    "%d-%B-%y",
 )
 
-DATE_TOKEN_RE = re.compile(r"^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$")
+DATE_TOKEN_RE = re.compile(
+    r"^(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3,9}-\d{2,4})$"
+)
 CHEQUE_INTEGER_FLOAT_RE = re.compile(r"^(?P<digits>\d+)\.0+$")
 CHEQUE_DIGITS_ONLY_RE = re.compile(r"^\d+$")
 CHEQUE_DETAIL_HINT_RE = re.compile(

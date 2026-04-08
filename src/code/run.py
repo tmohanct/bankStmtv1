@@ -9,6 +9,14 @@ import time
 import os
 from pathlib import Path
 
+CODE_ROOT = Path(__file__).resolve().parent
+SRC_ROOT = CODE_ROOT.parent
+for import_root in (str(CODE_ROOT), str(SRC_ROOT)):
+    while import_root in sys.path:
+        sys.path.remove(import_root)
+for index, import_root in enumerate((str(CODE_ROOT), str(SRC_ROOT))):
+    sys.path.insert(index, import_root)
+
 import axis_parser
 import bank_detector
 import bob_parser
