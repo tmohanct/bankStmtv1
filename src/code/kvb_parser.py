@@ -15,7 +15,7 @@ from parser_helpers import build_record, normalize_date_with_formats
 from utils import clean_cell, parse_amount
 
 RENDER_ZOOM = 2.0
-OCR_AMOUNT_TOKEN_PATTERN = r"-?\(?(?:\d{1,3}(?:,\d{2,3})*|\d+)?\.\d{2}\)?(?:CR|DR|MR|[\]\)\}\|])?"
+OCR_AMOUNT_TOKEN_PATTERN = r"-?\(?(?:\d{1,3}(?:,\s?\d{2,3})*|\d+)?\.\d{2}\)?(?:CR|DR|MR|[\]\)\}\|])?"
 OCR_DATE_TOKEN_PATTERN = r"\d{2}-\d{2}-\d{4}"
 OCR_DATE_SUFFIX_PATTERN = r"[\]\)\}\|]?"
 OCR_ROW_RE = re.compile(
@@ -26,7 +26,7 @@ OCR_ROW_RE = re.compile(
     rf"(?P<amount>{OCR_AMOUNT_TOKEN_PATTERN})\s+"
     rf"(?P<balance>{OCR_AMOUNT_TOKEN_PATTERN})$"
 )
-OPENING_BALANCE_RE = re.compile(r"Opening Balance.*?(-?[0-9,]+\.\d{2})")
+OPENING_BALANCE_RE = re.compile(r"Opening Balance.*?(-?(?:\d{1,3}(?:,\s?\d{2,3})*|\d+)\.\d{2})", re.IGNORECASE)
 OCR_DATE_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y")
 TEXT_DATE_FORMATS = ("%d/%m/%y",)
 TEXT_ROW_RE = re.compile(
@@ -34,7 +34,7 @@ TEXT_ROW_RE = re.compile(
     r"(?P<value_date>\d{2}/\d{2}/\d{2})\s*"
     r"(?P<rest>.*)$"
 )
-TEXT_AMOUNT_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{2,3})*|\d+)?\.\d{2}")
+TEXT_AMOUNT_RE = re.compile(r"-?(?:\d{1,3}(?:,\s?\d{2,3})*|\d+)?\.\d{2}")
 TEXT_DETECTION_MIN_ROWS = 3
 TOKENIZED_TEXT_ROW_START_RE = re.compile(
     r"^\d{2}(?:[-/]\d{2}[-/]\d{4}|-[A-Za-z]{3}-\d{4})\s+\d{2}:\d{2}(?::\d{2})?$",
@@ -46,7 +46,7 @@ TOKENIZED_TEXT_AMOUNT_RE = re.compile(
     rf"^{OCR_AMOUNT_TOKEN_PATTERN}$",
     re.IGNORECASE,
 )
-OCR_FOOTER_PREFIXES = ("Page No.",)
+OCR_FOOTER_PREFIXES = ("Page No.", "Page :", "Page:")
 OCR_HEADER_PREFIXES = (
     "Account Statement",
     "as of ",
@@ -62,6 +62,23 @@ OCR_HEADER_PREFIXES = (
     "From Date ",
     "To Date ",
     "Transaction Date Value Date",
+    "Txn Dt ",
+    "Jxn Dt ",
+)
+LEGACY_OCR_BREAK_PREFIXES = (
+    "PAGE",
+    "OPENING BALANCE",
+    "TOTAL CREDIT AMOUNT",
+    "TOTAL DEBIT AMOUNT",
+    "CLOSING BALANCE",
+    "NET AVAILABLE BALANCE",
+    "IFSC CODE",
+    "MICR",
+    "HELPLINE NO.",
+    "BRANCH ADDRESS",
+    "PHONE :",
+    "REGD. OFFICE",
+    "UNLESS THE CONSTITUENT",
 )
 CREDIT_HINTS = (
     "CASH DEP",
@@ -175,9 +192,23 @@ def _clean_ocr_line(raw_line: str) -> str:
 def _should_skip_ocr_line(line: str) -> bool:
     if not line:
         return True
-    if any(line.startswith(prefix) for prefix in OCR_FOOTER_PREFIXES):
+    upper_line = line.upper()
+    if any(upper_line.startswith(prefix.upper()) for prefix in OCR_FOOTER_PREFIXES):
         return True
-    return any(line.startswith(prefix) for prefix in OCR_HEADER_PREFIXES)
+    return any(upper_line.startswith(prefix.upper()) for prefix in OCR_HEADER_PREFIXES)
+
+
+def _is_legacy_ocr_break_line(line: str) -> bool:
+    normalized = clean_cell(line)
+    if not normalized:
+        return True
+
+    upper_line = normalized.upper()
+    if any(upper_line.startswith(prefix) for prefix in LEGACY_OCR_BREAK_PREFIXES):
+        return True
+    if re.fullmatch(r"PAGE\s*:?\s*\d+", normalized, flags=re.IGNORECASE):
+        return True
+    return "ACRONYMS DESCRIPTIONS" in upper_line
 
 
 def _split_ocr_body(body_text: str) -> tuple[str, str]:
@@ -369,6 +400,11 @@ def _parse_ocr_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[s
     tokenized_previous_balance: float | None = None
     current_row_lines: list[str] = []
 
+    legacy_records: list[dict[str, Any]] = []
+    legacy_previous_balance: float | None = None
+    legacy_pending: PendingRecord | None = None
+    legacy_in_summary_block = False
+
     with fitz.open(pdf_path) as pdf:
         for page_idx, page in enumerate(pdf, start=1):
             text = _render_page_text(page)
@@ -387,6 +423,8 @@ def _parse_ocr_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[s
                         inline_previous_balance = opening_balance
                     if tokenized_previous_balance is None:
                         tokenized_previous_balance = opening_balance
+                    if legacy_previous_balance is None:
+                        legacy_previous_balance = opening_balance
 
             usable_lines = [line for line in cleaned_lines if line and not _should_skip_ocr_line(line)]
 
@@ -431,11 +469,50 @@ def _parse_ocr_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[s
                 if inline_pending is not None:
                     inline_pending.continuation_lines.append(line)
 
+            for line in cleaned_lines:
+                if not line:
+                    continue
+
+                parsed = _parse_text_row(line)
+                if parsed is not None:
+                    legacy_in_summary_block = False
+                    if legacy_pending is not None:
+                        if _is_opening_balance_pending(legacy_pending):
+                            next_balance = parse_amount(legacy_pending.balance_text)
+                            if next_balance is not None:
+                                legacy_previous_balance = next_balance
+                        else:
+                            record, legacy_previous_balance = _finalize_record(
+                                legacy_pending,
+                                legacy_previous_balance,
+                                TEXT_DATE_FORMATS,
+                            )
+                            legacy_records.append(record)
+
+                    legacy_pending = PendingRecord(**parsed)
+                    continue
+
+                if _is_legacy_ocr_break_line(line):
+                    legacy_in_summary_block = True
+                    continue
+
+                if legacy_pending is not None and not legacy_in_summary_block and not _should_skip_ocr_line(line):
+                    legacy_pending.continuation_lines.append(line)
+
     if inline_pending is not None:
         record, inline_previous_balance = _finalize_record(inline_pending, inline_previous_balance, OCR_DATE_FORMATS)
         inline_records.append(record)
         if progress_cb is not None:
             progress_cb(len(inline_records))
+
+    if legacy_pending is not None:
+        if _is_opening_balance_pending(legacy_pending):
+            next_balance = parse_amount(legacy_pending.balance_text)
+            if next_balance is not None:
+                legacy_previous_balance = next_balance
+        else:
+            record, legacy_previous_balance = _finalize_record(legacy_pending, legacy_previous_balance, TEXT_DATE_FORMATS)
+            legacy_records.append(record)
 
     current_row_lines, tokenized_previous_balance = _finalize_tokenized_pending_record(
         current_row_lines,
@@ -444,18 +521,18 @@ def _parse_ocr_statement(pdf_path: str, logger, progress_cb=None) -> list[dict[s
         progress_cb=progress_cb,
     )
 
-    selected_records = inline_records
-    selected_balance = inline_previous_balance
-    selected_mode = "inline"
-    if len(tokenized_records) > len(inline_records):
-        selected_records = tokenized_records
-        selected_balance = tokenized_previous_balance
-        selected_mode = "tokenized"
+    candidates = (
+        ("inline", inline_records, inline_previous_balance),
+        ("tokenized", tokenized_records, tokenized_previous_balance),
+        ("legacy", legacy_records, legacy_previous_balance),
+    )
+    selected_mode, selected_records, selected_balance = max(candidates, key=lambda item: len(item[1]))
 
     logger.info(
-        "KVB OCR parse candidates: inline_rows=%s tokenized_rows=%s selected=%s",
+        "KVB OCR parse candidates: inline_rows=%s tokenized_rows=%s legacy_rows=%s selected=%s",
         len(inline_records),
         len(tokenized_records),
+        len(legacy_records),
         selected_mode,
     )
 

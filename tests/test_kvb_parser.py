@@ -438,6 +438,114 @@ class KVBParserUnitTests(unittest.TestCase):
         self.assertEqual(records[2]["Details"], "CASH DEP-TP-K ANNAMALAI- KOVILOOR")
         self.assertEqual(records[2]["Credit"], 20000.0)
 
+    def test_ocr_parser_handles_scanned_legacy_kvb_layout(self) -> None:
+        class FakePage:
+            def __init__(self, text: str) -> None:
+                self._text = text
+
+        class FakeDocument(list):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        page_text = "\n".join(
+            [
+                "Karur Vysya Bank",
+                "THE KARUR VYSYA BANK LTD.",
+                "BRANCH : SRIRANGAM-TRICHY",
+                "STATEMENT OF ACCOUNT",
+                "INDIAN RUPEES",
+                "Messrs. SHREE VEEJAY PROPERTY DEVELOPERS PRIVATE LIMITED CA-KVB-ECONOMY",
+                "NO 43 SHREE VEEJAY PROPERTY Period from: 01-JAN-2026 .",
+                "DEVELOPERS PRIVATE LIMITED NO 43 Period To: 31-MAR-2026",
+                "NEHRU SECOND STREET EDAMALAIPATTI Account Number 1276135000007451",
+                "CKYC NO: XXXxXXXXXXX1409",
+                "TIRUCHIRAPPALLI 620012",
+                "JXN DT VALUE_DT BRN DESCRIPTION REFERENCE DEBITS CREDITS BALANCE",
+                "01/01/26 01/01/26 B/F... 32,31,589.38",
+                "02/01/26 02/01/26 1276 100% To DEV ACNT DR - 127 000000000000 32,21,000.00 10,589.38",
+                "6135000005280 - SHREE VEE",
+                "JAY PROPERTY DEVELOPERS P",
+                "RIVATE :",
+                "09/01/26 09/01/26 2101 NEFT CR-SBINO010205-VENKA 31, 43,340.00 31,53,929.38",
+                "TASWAMI KRISHNASWAMI VASA",
+                "NISHRER VEE TAY PROPERTY-S",
+                "BIN 54",
+                "23/01/26 23/01/26 2101 NEFT CR-BKID0008299-BANK 90,109.00 32, 44,038.38",
+                "OF INDIA-SHREE VEEJAY PRO",
+                "PERTY DEVELOPERS -BKIDY260",
+                "28/01/26 28/01/26 2101 NEFT CR-SBINO010205-RAMSA 5,75,000.00 38,19,038.38",
+                "NKAR S-SREE VEE JAY PROP",
+                "ERTY DEVELOPERS-SBIN4260281.",
+                "31/01/26 31/01/26 1276 FT _-100% To DEV ACNT DR - 000000000000 =38,00,000.00 19,038.38",
+                "1276135000005280 - SHREE",
+                "VEEJAY PROPERTY DEVELOPE",
+                "RS PRIVATE",
+                "05/02/26 05/02/26 2101 NEFT CR-SBIN0010205-SUDHA 46,53,000.00 46,72,038.38",
+                "KAR RATHINAM-VEEJAY PROP",
+                "ERTY DEVELOPERS-SBINS2603",
+                "11/02/26 11/02/26 2101 NEFT CR-SBINO010205-VENKA 5,82,100.00 52,54,138.38",
+                "TASWAMI KRISHNASWAMI VASA",
+                "N-SHREE VEEJAY PROPERTY D",
+                "EVELOPE-SBIN226042599936",
+                "02/03/26 02/03/26 1276 100% TRANSFER TO DEVELOPE 000000000000 52,40,000.00 14,138.38",
+                "R_ ACCOUNT DR - 1276135000",
+                "005280 - SHREE VEEJAY PRO",
+                "PERTY DEVELOPERS PRIVATE",
+                "28/03/26 28/03/26 1276 SMS Charges for MAR2026 4.13 14,134.25",
+                "page: 1",
+                "Opening Balance < 32,31,589.38 _",
+                "Total Credit Amount 2 90, 43,549.00 Credit Count :5",
+                "Total Debit Amount : 1,22,61,004.13 Debit-Count :4",
+                "Closing Balance : 14,134.25",
+                "Net Available Balance as of 30-MAR-2026 is : 14134.25 .",
+                "ACRONYMS DESCRIPTIONS",
+                "IFSC Code : KvBL0001276",
+                "MICR_Code : 620053005",
+                "Regd. Office : Karur Vysya Bank,Central office,Erode Road, Karur-639002(Tamil Nadu) www.kvb.bank.in",
+            ]
+        )
+
+        logger = logging.getLogger("tests.kvb.ocr-legacy")
+        logger.handlers.clear()
+        logger.addHandler(logging.NullHandler())
+
+        with patch.object(kvb_parser, "_configure_tesseract", return_value="tesseract.exe"):
+            with patch.object(kvb_parser, "_render_page_text", side_effect=lambda page: page._text):
+                with patch.object(
+                    kvb_parser.fitz,
+                    "open",
+                    return_value=FakeDocument([FakePage(page_text)]),
+                ):
+                    records = kvb_parser._parse_ocr_statement("dummy.pdf", logger)
+
+        self.assertEqual(len(records), 9)
+        self.assertEqual(sum(row["Debit"] is not None for row in records), 4)
+        self.assertEqual(sum(row["Credit"] is not None for row in records), 5)
+
+        self.assertEqual(records[0]["Date"], "02/01/2026")
+        self.assertTrue(records[0]["Details"].startswith("100% To DEV ACNT DR - 127 000000000000"))
+        self.assertIn("6135000005280 - SHREE VEE", records[0]["Details"])
+        self.assertEqual(records[0]["Debit"], 3221000.0)
+        self.assertIsNone(records[0]["Credit"])
+        self.assertEqual(records[0]["Balance"], 10589.38)
+
+        self.assertEqual(records[1]["Date"], "09/01/2026")
+        self.assertTrue(records[1]["Details"].startswith("NEFT CR-SBINO010205-VENKA"))
+        self.assertIsNone(records[1]["Debit"])
+        self.assertEqual(records[1]["Credit"], 3143340.0)
+        self.assertEqual(records[1]["Balance"], 3153929.38)
+
+        self.assertEqual(records[-1]["Date"], "28/03/2026")
+        self.assertEqual(records[-1]["Details"], "SMS Charges for MAR2026")
+        self.assertEqual(records[-1]["Debit"], 4.13)
+        self.assertIsNone(records[-1]["Credit"])
+        self.assertEqual(records[-1]["Balance"], 14134.25)
+        self.assertNotIn("Opening Balance", records[-1]["Details"])
+        self.assertNotIn("ACRONYMS DESCRIPTIONS", records[-1]["Details"])
+
 
 if __name__ == "__main__":
     unittest.main()
