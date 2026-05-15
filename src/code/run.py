@@ -37,6 +37,7 @@ import kotak_parser
 import pnb_parser
 import sbi_parser
 import southind_parser
+import tmb_parser
 import unionbank_parser
 from final_excel_builder import build_final_workbook
 from utils import (
@@ -71,6 +72,7 @@ PARSERS = {
     "pnb": pnb_parser.parse,
     "sbi": sbi_parser.parse,
     "southind": southind_parser.parse,
+    "tmb": tmb_parser.parse,
     "unionbank": unionbank_parser.parse,
 }
 SUPPORTED_BANK_CODES = "/".join(sorted(PARSERS))

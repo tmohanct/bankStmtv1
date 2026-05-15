@@ -9,6 +9,7 @@ from parsers.base_parser import BaseStatementParser
 from parsers.iob_parser import IOBParser
 from parsers.kotak_parser import KotakParser
 from parsers.southind_parser import SouthIndianParser
+from parsers.tmb_parser import TMBParser
 from parsers.unionbank_parser import UnionBankParser
 
 ParserFactory = Callable[[], BaseStatementParser]
@@ -18,6 +19,7 @@ PARSER_REGISTRY: dict[str, ParserFactory] = {
     "iob": IOBParser,
     "kotak": KotakParser,
     "southind": SouthIndianParser,
+    "tmb": TMBParser,
     "unionbank": UnionBankParser,
 }
 
