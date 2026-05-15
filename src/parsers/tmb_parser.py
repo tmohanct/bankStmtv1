@@ -14,6 +14,7 @@ import pdfplumber
 from parsers.base_parser import BaseStatementParser
 
 DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{4}$")
+TABLE_DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 PAGE_FOOTER_RE = re.compile(r"^Page\s+\d+\s+of\s+\d+$", re.IGNORECASE)
 
 LINE_Y_TOLERANCE = 3.0
@@ -33,6 +34,13 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _clean_table_detail(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).replace("\r", "").replace("\n", "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _clean_detail_key(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", _clean_text(value))
 
@@ -43,15 +51,26 @@ def _parse_amount(value: Any) -> float | None:
         return None
 
     normalized = text.upper()
-    normalized = re.sub(r"\b(?:CR|DR|INR|RS)\b", "", normalized)
-    normalized = normalized.replace(",", "").replace(" ", "").replace("+", "")
+    negative = bool(re.search(r"\bDR\.?\b|\bDR\.?$", normalized))
+    normalized = re.sub(r"\b(?:CR|DR|INR|RS)\.?", "", normalized)
+    normalized = (
+        normalized.replace(",", "")
+        .replace(" ", "")
+        .replace("+", "")
+        .replace("(", "-")
+        .replace(")", "")
+    )
     if normalized in {"", "-", "."}:
         return None
 
     try:
-        return float(normalized)
+        amount = float(normalized)
     except ValueError:
         return None
+
+    if negative and amount > 0:
+        return -amount
+    return amount
 
 
 def _normalize_date(value: Any) -> str:
@@ -59,10 +78,12 @@ def _normalize_date(value: Any) -> str:
     if not text:
         return ""
 
-    try:
-        return datetime.strptime(text, "%d-%m-%Y").strftime("%d/%m/%Y")
-    except ValueError:
-        return text
+    for date_format in ("%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, date_format).strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    return text
 
 
 def _normalize_cheque_number(value: Any, details: Any = "") -> str:
@@ -135,9 +156,11 @@ def _new_record(
     source_page: int,
 ) -> dict[str, Any]:
     clean_details = _clean_text(details)
+    date = _normalize_date(date_text)
     return {
         "Sno": 0,
-        "Date": _normalize_date(date_text),
+        "Date": date,
+        "Value_Date": date,
         "Details": clean_details,
         "Detail_Clean": _clean_detail_key(clean_details),
         "Cheque No": _normalize_cheque_number(cheque_no, clean_details),
@@ -148,13 +171,63 @@ def _new_record(
     }
 
 
-def parse_tmb_records(
+def _is_table_transaction_row(row: list[str]) -> bool:
+    return len(row) >= 7 and bool(TABLE_DATE_RE.match(row[0]))
+
+
+def _build_table_record(row: list[str], source_page: int) -> dict[str, Any]:
+    details = _clean_table_detail(row[3])
+    date = _normalize_date(row[0])
+    value_date = _normalize_date(row[1]) or date
+    cheque_no = _clean_text(row[2])
+
+    return {
+        "Sno": 0,
+        "Date": date,
+        "Value_Date": value_date,
+        "Details": details,
+        "Detail_Clean": _clean_detail_key(details),
+        "Cheque No": _normalize_cheque_number(cheque_no, details),
+        "Debit": _parse_amount(row[4]),
+        "Credit": _parse_amount(row[5]),
+        "Balance": _parse_amount(row[6]),
+        "Source_Page": source_page,
+    }
+
+
+def _parse_table_records(
     pdf_path: str | Path,
     logger: logging.Logger,
     progress_cb: Callable[[int], None] | None = None,
 ) -> list[dict[str, Any]]:
-    logger.info("Parsing TMB statement: %s", pdf_path)
+    records: list[dict[str, Any]] = []
 
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for page_idx, page in enumerate(pdf.pages, start=1):
+            tables = page.extract_tables() or []
+            logger.debug("TMB page %s: extracted %s table(s)", page_idx, len(tables))
+
+            for table in tables:
+                for raw_row in table:
+                    row = [_clean_text(cell) for cell in raw_row]
+                    if not _is_table_transaction_row(row):
+                        continue
+
+                    records.append(_build_table_record(raw_row, page_idx))
+                    if progress_cb is not None:
+                        progress_cb(len(records))
+
+    for index, record in enumerate(records, start=1):
+        record["Sno"] = index
+
+    return records
+
+
+def _parse_positioned_records(
+    pdf_path: str | Path,
+    logger: logging.Logger,
+    progress_cb: Callable[[int], None] | None = None,
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     active_record: dict[str, Any] | None = None
 
@@ -222,6 +295,20 @@ def parse_tmb_records(
     for index, record in enumerate(records, start=1):
         record["Sno"] = index
 
+    return records
+
+
+def parse_tmb_records(
+    pdf_path: str | Path,
+    logger: logging.Logger,
+    progress_cb: Callable[[int], None] | None = None,
+) -> list[dict[str, Any]]:
+    logger.info("Parsing TMB statement: %s", pdf_path)
+
+    records = _parse_table_records(pdf_path=pdf_path, logger=logger, progress_cb=progress_cb)
+    if not records:
+        records = _parse_positioned_records(pdf_path=pdf_path, logger=logger, progress_cb=progress_cb)
+
     logger.info("TMB parse complete: rows=%s", len(records))
     return records
 
@@ -239,7 +326,7 @@ class TMBParser(BaseStatementParser):
         rows = [
             {
                 "Date": record["Date"],
-                "Value_Date": record["Date"],
+                "Value_Date": record.get("Value_Date", record["Date"]),
                 "Description": record["Details"],
                 "Debit": record["Debit"],
                 "Credit": record["Credit"],
