@@ -99,6 +99,80 @@ def _select_cheque_number(tran_id: str, instr_id: str) -> str:
     return ""
 
 
+def _build_record(
+    *,
+    statement_date: str,
+    details: str,
+    cheque_number: str,
+    debit: float | None,
+    credit: float | None,
+    balance: float | None,
+) -> dict[str, Any] | None:
+    if not details or balance is None or (debit is None and credit is None):
+        return None
+
+    return {
+        "Sno": 0,
+        "Date": _normalize_output_date(statement_date),
+        "Details": details,
+        "Detail_Clean": _clean_detail_key(details),
+        "Cheque No": cheque_number,
+        "Debit": debit,
+        "Credit": credit,
+        "Balance": balance,
+    }
+
+
+def _parse_current_account_row(row: list[str]) -> dict[str, Any] | None:
+    if len(row) < 8:
+        return None
+
+    date_text, remarks, transaction_id, utr_number, instr_id, withdrawals_text, deposits_text, balance_text = row[:8]
+    statement_date = _extract_statement_date(date_text)
+    if not DATE_RE.match(statement_date):
+        return None
+
+    return _build_record(
+        statement_date=statement_date,
+        details=_build_details(
+            remarks=remarks,
+            tran_id=transaction_id,
+            utr_number=utr_number,
+            instr_id=instr_id,
+        ),
+        cheque_number=_select_cheque_number(transaction_id, instr_id),
+        debit=_parse_signed_amount(withdrawals_text),
+        credit=_parse_signed_amount(deposits_text),
+        balance=_parse_signed_amount(balance_text),
+    )
+
+
+def _parse_savings_account_row(row: list[str]) -> dict[str, Any] | None:
+    if len(row) < 5:
+        return None
+
+    date_text, transaction_id, remarks, amount_text, balance_text = row[:5]
+    statement_date = _extract_statement_date(date_text)
+    if not DATE_RE.match(statement_date):
+        return None
+
+    debit, credit = _split_debit_credit(amount_text)
+
+    return _build_record(
+        statement_date=statement_date,
+        details=_build_details(
+            remarks=remarks,
+            tran_id=transaction_id,
+            utr_number="",
+            instr_id="",
+        ),
+        cheque_number=_clean_text(transaction_id),
+        debit=debit,
+        credit=credit,
+        balance=_parse_signed_amount(balance_text),
+    )
+
+
 def parse_unionbank_records(
     pdf_path: str | Path,
     logger: logging.Logger,
@@ -115,36 +189,10 @@ def parse_unionbank_records(
             for table in tables:
                 for raw_row in table:
                     row = [_clean_text(cell) for cell in raw_row]
-                    if len(row) < 8:
+                    record = _parse_current_account_row(row) or _parse_savings_account_row(row)
+                    if record is None:
                         continue
 
-                    date_text, remarks, transaction_id, utr_number, instr_id, withdrawals_text, deposits_text, balance_text = row[:8]
-                    statement_date = _extract_statement_date(date_text)
-                    if not DATE_RE.match(statement_date):
-                        continue
-
-                    debit = _parse_signed_amount(withdrawals_text)
-                    credit = _parse_signed_amount(deposits_text)
-                    balance = _parse_signed_amount(balance_text)
-                    details = _build_details(
-                        remarks=remarks,
-                        tran_id=transaction_id,
-                        utr_number=utr_number,
-                        instr_id=instr_id,
-                    )
-                    if not details or balance is None or (debit is None and credit is None):
-                        continue
-
-                    record = {
-                        "Sno": 0,
-                        "Date": _normalize_output_date(statement_date),
-                        "Details": details,
-                        "Detail_Clean": _clean_detail_key(details),
-                        "Cheque No": _select_cheque_number(transaction_id, instr_id),
-                        "Debit": debit,
-                        "Credit": credit,
-                        "Balance": balance,
-                    }
                     records.append(record)
                     if progress_cb is not None:
                         progress_cb(len(records))
