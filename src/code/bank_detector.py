@@ -13,6 +13,7 @@ from PIL import Image
 BANK_SIGNATURES: dict[str, tuple[tuple[str, int], ...]] = {
     "axis": (("AXIS BANK", 4), ("UTIB0", 3), ("ACCOUNT STATEMENT REPORT", 1)),
     "bob": (("BANK OF BARODA", 4), ("BARB0", 3), ("STATEMENT OF TRANSACTIONS IN CASH CREDIT ACCOUNT", 1)),
+    "boi": (("IFSC CODE : BKID", 7), ("BANK OF INDIA", 5), ("BKID0", 3)),
     "bom": (("BANK OF MAHARASHTRA", 4), ("MAHB0", 3), ("MAHABANK.CO.IN", 1)),
     "canara": (("CNRB0", 4), ("STATEMENT FOR A/C", 2), ("DEPOSITS WITHDRAWALS BALANCE", 1)),
     "central": (("CENTRAL BANK OF INDIA", 5), ("CBIN0", 3), ("CBIN", 1)),

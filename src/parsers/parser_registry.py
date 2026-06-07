@@ -6,6 +6,7 @@ from typing import Callable
 
 from parsers.axis_parser import AxisParser
 from parsers.base_parser import BaseStatementParser
+from parsers.boi_parser import BOIParser
 from parsers.iob_parser import IOBParser
 from parsers.kotak_parser import KotakParser
 from parsers.southind_parser import SouthIndianParser
@@ -16,6 +17,7 @@ ParserFactory = Callable[[], BaseStatementParser]
 
 PARSER_REGISTRY: dict[str, ParserFactory] = {
     "axis": AxisParser,
+    "boi": BOIParser,
     "iob": IOBParser,
     "kotak": KotakParser,
     "southind": SouthIndianParser,

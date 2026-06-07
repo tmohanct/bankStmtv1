@@ -20,6 +20,7 @@ for index, import_root in enumerate((str(CODE_ROOT), str(SRC_ROOT))):
 import axis_parser
 import bank_detector
 import bob_parser
+import boi_parser
 import bom_parser
 import canara_parser
 import centralbank_parser
@@ -55,6 +56,7 @@ INVALID_FILENAME_CHARS_RE = re.compile(r'[<>:"/\\\\|?*]+')
 PARSERS = {
     "axis": axis_parser.parse,
     "bob": bob_parser.parse,
+    "boi": boi_parser.parse,
     "bom": bom_parser.parse,
     "canara": canara_parser.parse,
     "central": centralbank_parser.parse,
