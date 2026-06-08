@@ -25,6 +25,7 @@ NEW_FORMAT_COLUMNS = {
     "debit": 6,
     "credit": 7,
     "balance": 8,
+    "balance_type": 9,
 }
 
 
@@ -48,6 +49,8 @@ def _detect_column_map(row: list[str]) -> dict[str, int] | None:
             column_map["credit"] = index
         elif token == "balance":
             column_map["balance"] = index
+        elif token in {"drcr", "balancetype", "balanceindicator"}:
+            column_map["balance_type"] = index
 
     required_columns = {"date", "details", "debit", "credit", "balance"}
     if required_columns.issubset(column_map):
@@ -66,6 +69,25 @@ def _pick(row: list[str], column_map: dict[str, int], key: str) -> str:
     if index < 0 or index >= len(row):
         return ""
     return row[index]
+
+
+def _parse_balance(value: str, balance_type: str = "") -> float | None:
+    balance = parse_amount(value)
+    if balance is None:
+        return None
+
+    indicator = _normalize_header(balance_type)
+    if not indicator:
+        value_text = clean_cell(value).upper()
+        suffix_match = re.search(r"(DR|CR)\s*$", value_text)
+        if suffix_match is not None:
+            indicator = suffix_match.group(1).lower()
+
+    if indicator.startswith("dr"):
+        return -abs(balance)
+    if indicator.startswith("cr"):
+        return abs(balance)
+    return balance
 
 
 def _is_transaction_row(row: list[str]) -> bool:
@@ -108,7 +130,10 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
                         cheque_no=_pick(row, row_column_map, "cheque"),
                         debit=parse_amount(_pick(row, row_column_map, "debit")),
                         credit=parse_amount(_pick(row, row_column_map, "credit")),
-                        balance=parse_amount(_pick(row, row_column_map, "balance")),
+                        balance=_parse_balance(
+                            _pick(row, row_column_map, "balance"),
+                            _pick(row, row_column_map, "balance_type"),
+                        ),
                         date_formats=DATE_FORMATS,
                     )
                     records.append(record)
