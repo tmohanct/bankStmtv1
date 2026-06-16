@@ -25,6 +25,7 @@ import bom_parser
 import canara_parser
 import centralbank_parser
 import cub_parser
+import dbs_parser
 import federal_parser
 import hdfc_parser
 import icici_parser
@@ -61,6 +62,7 @@ PARSERS = {
     "canara": canara_parser.parse,
     "central": centralbank_parser.parse,
     "cub": cub_parser.parse,
+    "dbs": dbs_parser.parse,
     "federal": federal_parser.parse,
     "hdfc": hdfc_parser.parse,
     "icici": icici_parser.parse,

@@ -18,6 +18,7 @@ BANK_SIGNATURES: dict[str, tuple[tuple[str, int], ...]] = {
     "canara": (("CNRB0", 4), ("STATEMENT FOR A/C", 2), ("DEPOSITS WITHDRAWALS BALANCE", 1)),
     "central": (("CENTRAL BANK OF INDIA", 5), ("CBIN0", 3), ("CBIN", 1)),
     "cub": (("CITY UNION BANK", 4), ("CIUB0", 3)),
+    "dbs": (("DBS BANK", 4), ("DBSCPIN", 3), ("DBSCPINOIMPS", 3)),
     "federal": (("FEDERAL BANK", 4), ("FDRL0", 3)),
     "hdfc": (("HDFC BANK", 4), ("HDFC0", 3)),
     "icici": (("ICICI BANK", 4), ("ICIC0", 3)),

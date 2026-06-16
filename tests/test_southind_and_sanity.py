@@ -11,11 +11,132 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-from parsers.southind_parser import _PendingRecord, _WordLine
+from parsers.southind_parser import _PendingRecord, _WordLine, _parse_amount, _parse_slno_layout_lines
 from run import collect_negative_balance_rows, report_negative_balance_rows
 
 
 class SouthIndRegressionTests(unittest.TestCase):
+    def test_new_slno_layout_captures_detail_lines_around_anchor(self) -> None:
+        lines = [
+            _WordLine(
+                y_center=302.1,
+                words=[
+                    (7.0, "SlNo"),
+                    (42.0, "Transaction"),
+                    (86.0, "Date"),
+                    (182.0, "Particulars"),
+                    (349.0, "Withdrawals"),
+                    (442.0, "Deposits"),
+                    (530.0, "Balance"),
+                    (561.1, "Amount"),
+                ],
+            ),
+            _WordLine(y_center=322.8, words=[(182.0, "UPI/PYTM/345780267437/")]),
+            _WordLine(y_center=333.0, words=[(182.0, "BSNL"), (205.1, "Landline")]),
+            _WordLine(
+                y_center=342.8,
+                words=[
+                    (7.0, "1"),
+                    (42.0, "01-Sep-2025"),
+                    (112.0, "01-Sep-2025"),
+                    (182.0, "Bill/Oid207350/PTM3F94B0"),
+                    (349.0, "943.00"),
+                    (530.0, "87,469.56"),
+                ],
+            ),
+            _WordLine(y_center=353.1, words=[(182.0, "C856E940BC87142BCA89")]),
+            _WordLine(y_center=363.2, words=[(182.0, "8FD560/paybil3066@pay")]),
+            _WordLine(y_center=388.0, words=[(182.0, "MOB/309117804897/Bill")]),
+            _WordLine(
+                y_center=392.8,
+                words=[
+                    (7.0, "2"),
+                    (42.0, "01-Sep-2025"),
+                    (112.0, "01-Sep-2025"),
+                    (349.0, "50,000.00"),
+                    (530.0, "37,469.56"),
+                ],
+            ),
+            _WordLine(y_center=398.1, words=[(182.0, "Payment/IMPS/")]),
+        ]
+        records: list[dict[str, object]] = []
+
+        _parse_slno_layout_lines(lines, records)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["Date"], "01/09/2025")
+        self.assertEqual(
+            records[0]["Details"],
+            "UPI/PYTM/345780267437/ BSNL Landline Bill/Oid207350/PTM3F94B0 C856E940BC87142BCA89 8FD560/paybil3066@pay",
+        )
+        self.assertEqual(records[0]["Debit"], 943.0)
+        self.assertEqual(records[0]["Balance"], 87469.56)
+        self.assertEqual(records[1]["Details"], "MOB/309117804897/Bill Payment/IMPS/")
+        self.assertEqual(records[1]["Debit"], 50000.0)
+
+    def test_new_slno_layout_handles_value_date_fallback_and_extra_decimal_amounts(self) -> None:
+        lines = [
+            _WordLine(y_center=755.8, words=[(182.0, "MOB/406614314325/Own")]),
+            _WordLine(
+                y_center=780.8,
+                words=[
+                    (7.0, "2653"),
+                    (42.0, "099-Mar-2026"),
+                    (112.0, "09-Mar-2026"),
+                    (349.0, "20.000.00"),
+                    (530.0, "1,029.039.11"),
+                ],
+            ),
+            _WordLine(y_center=790.8, words=[(182.0, "Account/IMPS/")]),
+        ]
+        records: list[dict[str, object]] = []
+
+        _parse_slno_layout_lines(lines, records)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["Date"], "09/03/2026")
+        self.assertEqual(records[0]["Debit"], 20000.0)
+        self.assertEqual(records[0]["Balance"], 1029039.11)
+        self.assertEqual(_parse_amount("20.000.00"), 20000.0)
+
+    def test_new_slno_layout_keeps_trailing_detail_with_previous_row(self) -> None:
+        lines = [
+            _WordLine(y_center=305.9, words=[(182.0, "IMPS/FDRL/409113753248")]),
+            _WordLine(y_center=316.0, words=[(182.0, "/DEEPAK"), (218.8, "M/ELOHIM")]),
+            _WordLine(
+                y_center=319.8,
+                words=[
+                    (7.0, "3696"),
+                    (42.0, "12-Jun-2026"),
+                    (112.0, "12-Jun-2026"),
+                    (530.0, "7,72,011.74"),
+                ],
+            ),
+            _WordLine(y_center=324.8, words=[(442.0, "4,000.00"), (182.0, "TRANSPORT/RBI234b29a")]),
+            _WordLine(y_center=336.1, words=[(182.0, "7e16b43ea8f34cb67cce857")]),
+            _WordLine(y_center=346.2, words=[(182.0, "f9#919944128777#D")]),
+            _WordLine(
+                y_center=369.8,
+                words=[
+                    (7.0, "3697"),
+                    (42.0, "12-Jun-2026"),
+                    (112.0, "12-Jun-2026"),
+                    (182.0, "MOB/359114508789/salary/"),
+                    (349.0, "24,500.00"),
+                    (530.0, "7,47,511.74"),
+                ],
+            ),
+            _WordLine(y_center=381.1, words=[(182.0, "IMPS/")]),
+        ]
+        records: list[dict[str, object]] = []
+
+        _parse_slno_layout_lines(lines, records)
+
+        self.assertEqual(len(records), 2)
+        self.assertIn("f9#919944128777#D", records[0]["Details"])
+        self.assertNotIn("f9#919944128777#D", records[1]["Details"])
+        self.assertEqual(records[1]["Details"], "MOB/359114508789/salary/ IMPS/")
+
     def test_shifted_balance_credit_row_is_not_dropped(self) -> None:
         pending = _PendingRecord(date_text="19-11-25")
         pending.add_line(
