@@ -6,16 +6,19 @@ from typing import Any
 
 import fitz
 
-from parser_helpers import build_record
+from parser_helpers import build_record, parse_signed_balance
 from utils import clean_cell, parse_amount
 
-DATE_RE = re.compile(r"^\d{2} [A-Za-z]{3} \d{4}$")
-DATE_FORMATS = ("%d %b %Y", "%d %B %Y")
+DATE_RE = re.compile(r"^(?:\d{2} [A-Za-z]{3,9} \d{4}|[A-Za-z]{3,9} \d{2} \d{4})$")
+DATE_FORMATS = ("%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y")
 HEADER_LINES = {"Date", "Transaction Details", "Debits", "Credits", "Balance"}
 DETAIL_SKIP_PREFIXES = ("page ",)
 DETAIL_SKIP_LINES = {"Ending Balance", "Total"}
 DETAIL_SKIP_PAGE_RE = re.compile(r"^\d+/\d+$")
-AMOUNT_TEXT_RE = re.compile(r"^(?:-|\+?\s*INR\s+[0-9,]+\.\d{2})$", re.IGNORECASE)
+AMOUNT_TEXT_RE = re.compile(
+    r"^(?:-|[+\-]?\s*(?:INR|RS\.?)?\s*[0-9,]+\.\d{2}\s*(?:CR|DR)?\.?)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -26,6 +29,37 @@ class PendingRecord:
 
 def _is_amount_or_dash(line: str) -> bool:
     return bool(AMOUNT_TEXT_RE.match(line))
+
+
+def _parse_transaction_amount(line: str) -> float | None:
+    value = parse_amount(line)
+    if value is None:
+        return None
+    return abs(value)
+
+
+def _has_balance_suffix(line: str) -> bool:
+    return bool(re.search(r"\b(?:CR|DR)\.?$", line.strip(), re.IGNORECASE))
+
+
+def _parse_debit_credit_marker(line: str) -> float | None:
+    if _has_balance_suffix(line):
+        return None
+    return _parse_transaction_amount(line)
+
+
+def _is_post_balance_footer(line: str) -> bool:
+    if not line:
+        return True
+
+    lowered = line.lower()
+    if lowered.startswith("cr inr") or lowered.startswith("dr inr"):
+        return True
+    if lowered.startswith("rupees "):
+        return True
+    if any(token in line for token in ("NEFT:", "UPI:", "RTGS:", "BBPS:", "IMPS:")):
+        return True
+    return False
 
 
 def _should_skip_detail_line(line: str) -> bool:
@@ -42,6 +76,45 @@ def _should_skip_detail_line(line: str) -> bool:
     if line.startswith("Indian Bank |"):
         return True
     return False
+
+
+def _find_footer_start_index(lines: list[str]) -> int:
+    for idx, line in enumerate(lines):
+        if line in DETAIL_SKIP_LINES or _is_post_balance_footer(line):
+            return idx
+    return len(lines)
+
+
+def _select_row_amount_markers(lines: list[str]) -> list[tuple[int, str]]:
+    footer_start_idx = _find_footer_start_index(lines)
+    amount_markers = [
+        (idx, line)
+        for idx, line in enumerate(lines[:footer_start_idx])
+        if _is_amount_or_dash(line)
+    ]
+
+    for marker_pos in range(len(amount_markers) - 1, -1, -1):
+        balance_idx, balance_text = amount_markers[marker_pos]
+        if balance_text == "-" or parse_signed_balance(balance_text) is None:
+            continue
+
+        if marker_pos >= 2:
+            debit_marker = amount_markers[marker_pos - 2]
+            credit_marker = amount_markers[marker_pos - 1]
+            debit_text = debit_marker[1]
+            credit_text = credit_marker[1]
+            debit_value = _parse_debit_credit_marker(debit_text) if debit_text != "-" else None
+            credit_value = _parse_debit_credit_marker(credit_text) if credit_text != "-" else None
+            if (debit_value is not None) != (credit_value is not None):
+                return [debit_marker, credit_marker, (balance_idx, balance_text)]
+
+        if marker_pos >= 1:
+            amount_marker = amount_markers[marker_pos - 1]
+            amount_text = amount_marker[1]
+            if amount_text != "-" and _parse_debit_credit_marker(amount_text) is not None:
+                return [amount_marker, (balance_idx, balance_text)]
+
+    return []
 
 
 def _classify_amount_from_balance(
@@ -63,18 +136,20 @@ def _finalize_record(
     pending: PendingRecord,
     previous_balance: float | None,
 ) -> tuple[dict[str, Any] | None, float | None]:
-    amount_markers = [(idx, line) for idx, line in enumerate(pending.lines) if _is_amount_or_dash(line)]
-    if len(amount_markers) < 2:
+    row_markers = _select_row_amount_markers(pending.lines)
+    if len(row_markers) < 2:
         return None, previous_balance
 
-    row_markers = amount_markers[:3]
     row_marker_indexes = {idx for idx, _ in row_markers}
+    footer_start_idx = _find_footer_start_index(pending.lines)
     detail_parts = [
         line
         for idx, line in enumerate(pending.lines)
-        if idx not in row_marker_indexes
+        if idx < footer_start_idx
+        and idx not in row_marker_indexes
         and not _is_amount_or_dash(line)
         and not _should_skip_detail_line(line)
+        and not _is_post_balance_footer(line)
     ]
     details = clean_cell(" ".join(detail_parts))
 
@@ -85,14 +160,14 @@ def _finalize_record(
         debit_text = row_markers[0][1]
         credit_text = row_markers[1][1]
         balance_text = row_markers[2][1]
-        debit = parse_amount(debit_text) if debit_text != "-" else None
-        credit = parse_amount(credit_text) if credit_text != "-" else None
-        balance_value = parse_amount(balance_text)
+        debit = _parse_debit_credit_marker(debit_text) if debit_text != "-" else None
+        credit = _parse_debit_credit_marker(credit_text) if credit_text != "-" else None
+        balance_value = parse_signed_balance(balance_text)
     else:
         amount_text = row_markers[0][1]
         balance_text = row_markers[1][1]
-        amount_value = parse_amount(amount_text)
-        balance_value = parse_amount(balance_text)
+        amount_value = _parse_debit_credit_marker(amount_text)
+        balance_value = parse_signed_balance(balance_text)
         if amount_value is None or balance_value is None:
             return None, previous_balance
         debit, credit = _classify_amount_from_balance(
@@ -134,7 +209,7 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
                     continue
 
                 if expect_opening_balance:
-                    opening_balance = parse_amount(line)
+                    opening_balance = parse_signed_balance(line)
                     expect_opening_balance = False
                     if opening_balance is not None:
                         previous_balance = opening_balance

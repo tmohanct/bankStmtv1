@@ -42,6 +42,42 @@ CHEQUE_DETAIL_HINT_RE = re.compile(
     r"\b(?:CHQ|CHEQ(?:UE)?|CLG|CLEARING|CTS)\b",
     re.IGNORECASE,
 )
+CHEQUE_NUMBER_DETAIL_PATTERNS = (
+    re.compile(
+        r"\b(?:CHEQUE|CHEQ|CHQ\.?|CHQ)\s*(?:NO|NUM|NUMBER|#)?\s*[:#.\-]?\s*([0-9][0-9\s-]{2,24})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:INSTRUMENT|INSTR|INST)\s*(?:NO|NUM|NUMBER|#)?\s*[:#.\-]?\s*([0-9][0-9\s-]{2,24})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:CHQ|CHEQUE)\s+RETURN(?:\s*\([^)]*\))?\s*[:#.\-]?\s*([0-9]{3,18})\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:CHQ|CHEQUE)\s+(?:DEP|DEPOSIT|PAID|ISSUED|CLG|CLEARING)\b[^0-9]{0,20}([0-9]{3,18})\b",
+        re.IGNORECASE,
+    ),
+)
+COMPACT_CHEQUE_NUMBER_DETAIL_PATTERNS = (
+    re.compile(
+        r"(?:CHEQUERETURNISSUED|CHEQUERETURN|CHQRETURNISSUED|CHQRETURN)([0-9]{3,18})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:CHEQUENO|CHEQUENUMBER|CHEQUENUM|CHEQNO|CHEQNUMBER|CHEQNUM|CHQNO|CHQNUMBER|CHQNUM)([0-9]{3,18})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:INSTRUMENTNO|INSTRUMENTNUMBER|INSTRNO|INSTRNUMBER|INSTNO|INSTNUMBER)([0-9]{3,18})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:CHEQUEDEPOSIT|CHEQUEDEP|CHEQUEPAID|CHEQUEISSUED|CHEQUECLEARING|CHEQUECLG|CHQDEPOSIT|CHQDEP|CHQPAID|CHQISSUED|CHQCLEARING|CHQCLG)([0-9]{3,18})",
+        re.IGNORECASE,
+    ),
+)
 NON_CHEQUE_DETAIL_HINT_RE = re.compile(
     r"\b(?:UPI|IMPS|NEFT|RTGS|UTR|NACH|ACH|ATM|POS|ECOM|CARD|VPA|QR|WALLET|PAYTM|PHONEPE|GPAY|AEPS|APBS|BBPS|MOBILE|INB|NETBANKING|TRF|TRANSFER)\b",
     re.IGNORECASE,
@@ -94,6 +130,41 @@ def normalize_cheque_number(value: Any, details: Any = "") -> str:
     return text
 
 
+def _normalize_extracted_cheque_candidate(value: Any, details: Any) -> str:
+    compact_value = re.sub(r"[\s-]+", "", clean_cell(value))
+    integer_float_match = CHEQUE_INTEGER_FLOAT_RE.fullmatch(compact_value)
+    if integer_float_match is not None:
+        compact_value = integer_float_match.group("digits")
+
+    if not CHEQUE_DIGITS_ONLY_RE.fullmatch(compact_value):
+        return ""
+    if set(compact_value) == {"0"}:
+        return ""
+    return compact_value
+
+
+def extract_cheque_number_from_details(details: Any, detail_clean: Any = "") -> str:
+    detail_text = clean_cell(details)
+    compact_detail = clean_detail(detail_clean or detail_text).upper()
+    if not detail_text and not compact_detail:
+        return ""
+
+    for pattern in COMPACT_CHEQUE_NUMBER_DETAIL_PATTERNS:
+        match = pattern.search(compact_detail)
+        if match is None:
+            continue
+        candidate = _normalize_extracted_cheque_candidate(match.group(1), detail_text)
+        if candidate:
+            return candidate
+
+    for pattern in CHEQUE_NUMBER_DETAIL_PATTERNS:
+        for match in pattern.finditer(detail_text):
+            candidate = _normalize_extracted_cheque_candidate(match.group(1), detail_text)
+            if candidate:
+                return candidate
+    return ""
+
+
 def sanitize_cheque_column(frame: pd.DataFrame) -> pd.DataFrame:
     if frame is None or frame.empty or "Cheque No" not in frame.columns:
         return frame
@@ -103,11 +174,23 @@ def sanitize_cheque_column(frame: pd.DataFrame) -> pd.DataFrame:
         detail_series = output["Details"]
     else:
         detail_series = pd.Series([""] * len(output), index=output.index)
+    if "Detail_Clean" in output.columns:
+        detail_clean_series = output["Detail_Clean"]
+    else:
+        detail_clean_series = pd.Series([""] * len(output), index=output.index)
 
-    output["Cheque No"] = [
-        normalize_cheque_number(cheque_value, detail_value)
-        for cheque_value, detail_value in zip(output["Cheque No"], detail_series)
-    ]
+    sanitized_values: list[str] = []
+    for cheque_value, detail_value, detail_clean_value in zip(
+        output["Cheque No"],
+        detail_series,
+        detail_clean_series,
+    ):
+        normalized = normalize_cheque_number(cheque_value, detail_value)
+        if not normalized:
+            normalized = extract_cheque_number_from_details(detail_value, detail_clean_value)
+        sanitized_values.append(normalized)
+
+    output["Cheque No"] = sanitized_values
     return output
 
 
