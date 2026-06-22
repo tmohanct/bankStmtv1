@@ -111,7 +111,12 @@ class ReturnRejectSheetTests(unittest.TestCase):
             )
 
             workbook = load_workbook(final_path, data_only=True)
-            self.assertListEqual(workbook.sheetnames[:2], ["Statement", "Ret_Rej"])
+            self.assertListEqual(workbook.sheetnames[:3], ["PDF_Status", "Statement", "Ret_Rej"])
+            pdf_status_ws = workbook["PDF_Status"]
+            self.assertEqual(pdf_status_ws["A1"].value, "Customer Name:")
+            self.assertEqual(pdf_status_ws["C8"].value, "Status")
+            self.assertEqual(pdf_status_ws["C9"].value, "WARNING")
+            self.assertEqual(pdf_status_ws["C9"].fill.fgColor.rgb, "00FFF2CC")
             workbook.close()
 
             ret_rej_df = pd.read_excel(final_path, sheet_name="Ret_Rej")

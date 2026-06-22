@@ -330,6 +330,7 @@ def main(argv=None) -> int:
 
     try:
         merged_records: list[dict[str, object]] = []
+        source_pdf_passwords: list[str | None] = []
         saw_progress = False
 
         temp_dir = build_temp_work_dir(output_dir)
@@ -337,6 +338,7 @@ def main(argv=None) -> int:
             for index, pdf_path in enumerate(pdf_paths, start=1):
                 _, filename_password = split_pdf_filename_metadata(pdf_path)
                 pdf_password = args.pwd if args.pwd is not None else filename_password
+                source_pdf_passwords.append(pdf_password)
                 readable_pdf_path = prepare_pdf_for_reading(pdf_path, pdf_password, temp_dir, logger)
                 bank_key = requested_bank or bank_detector.detect_bank_from_pdf(readable_pdf_path, logger)
                 parser_fn = PARSERS[bank_key]
@@ -417,6 +419,8 @@ def main(argv=None) -> int:
             output_dir=output_dir,
             pdf_stem=output_stem,
             logger=logger,
+            source_pdf_paths=pdf_paths,
+            source_pdf_passwords=source_pdf_passwords,
         )
 
         print(f"Intermediate output written: {intermediate_output}")
