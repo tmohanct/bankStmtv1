@@ -470,6 +470,14 @@ def _build_return_reject_sheet(statement_df: pd.DataFrame) -> pd.DataFrame:
     return _ensure_columns(work)
 
 
+def _cheque_sort_value(value: Any) -> tuple[int, str]:
+    text = str(value or "").strip()
+    digits = re.sub(r"\D", "", text)
+    if digits:
+        return int(digits), text
+    return 10**12, text
+
+
 def _build_repeat_sheet(statement_df: pd.DataFrame, amount_column: str) -> pd.DataFrame:
     if statement_df.empty:
         return _ensure_columns(statement_df)
@@ -486,7 +494,17 @@ def _build_repeat_sheet(statement_df: pd.DataFrame, amount_column: str) -> pd.Da
     if work.empty:
         return _ensure_columns(work)
 
-    work = work.sort_values(by=[amount_column, "Sno"], ascending=[False, True])
+    cheque_series = work["Cheque No"].fillna("").astype(str).str.strip()
+    work["__has_cheque"] = cheque_series != ""
+    work["__cheque_sort"] = cheque_series.apply(_cheque_sort_value)
+    work["__date_sort"] = work["Date"].apply(_coerce_excel_date)
+    work = work.sort_values(
+        by=[amount_column, "__has_cheque", "__cheque_sort", "__date_sort", "Sno"],
+        ascending=[False, False, True, True, True],
+        kind="stable",
+        na_position="last",
+    )
+    work = work.drop(columns=["__has_cheque", "__cheque_sort", "__date_sort"])
     return _ensure_columns(work)
 
 
@@ -640,7 +658,7 @@ def _extract_first_page_lines(pdf_path: Path, password: str | None = None) -> li
     return [_clean_pdf_summary_value(line) for line in text.splitlines() if _clean_pdf_summary_value(line)]
 
 
-def _extract_known_bank_name(lines: list[str]) -> str:
+def _extract_known_bank_name(lines: list[str], pdf_path: Path | None = None) -> str:
     bank_names = (
         "Central Bank of India",
         "Indian Bank",
@@ -670,9 +688,19 @@ def _extract_known_bank_name(lines: list[str]) -> str:
     for bank_name in bank_names:
         if re.search(re.escape(bank_name), haystack, re.IGNORECASE):
             return bank_name
+    if re.search(r"\bIDIB0", haystack, re.IGNORECASE):
+        return "Indian Bank"
     if re.search(r"\bKVBL\b", haystack, re.IGNORECASE):
         return "Karur Vysya Bank"
-    return lines[0] if lines else ""
+
+    filename = pdf_path.stem if pdf_path is not None else ""
+    if re.search(r"\bindian\b|ivlindian", filename, re.IGNORECASE):
+        return "Indian Bank"
+
+    first_line = lines[0] if lines else ""
+    if re.fullmatch(r"(?:ACCOUNT|BANK)?\s*STATEMENT(?:\s+REPORT)?", first_line, re.IGNORECASE):
+        return ""
+    return first_line
 
 
 def _extract_account_number(lines: list[str]) -> str:
@@ -813,7 +841,7 @@ def _build_pdf_account_summary_rows(
 
     values = {
         "Customer Name": customer,
-        "Bank Name": _extract_known_bank_name(lines),
+        "Bank Name": _extract_known_bank_name(lines, pdf_path),
         "Account Number": _extract_account_number(lines),
         "Address": address,
         "Statement Date Between": _extract_statement_date_range(lines),

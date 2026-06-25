@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-from final_excel_builder import _build_return_reject_sheet, build_final_workbook
+from final_excel_builder import _build_repeat_sheet, _build_return_reject_sheet, _extract_known_bank_name, build_final_workbook
 from utils import OUTPUT_COLUMNS, clean_detail
 
 
@@ -76,6 +76,28 @@ def _statement_frame() -> pd.DataFrame:
     ]
     return pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
 
+
+class PdfAccountSummaryTests(unittest.TestCase):
+    def test_indian_statement_title_does_not_become_bank_name(self) -> None:
+        bank_name = _extract_known_bank_name(["ACCOUNT STATEMENT"], PROJECT_ROOT / "input" / "ivlIndian.pdf")
+
+        self.assertEqual(bank_name, "Indian Bank")
+
+class RepeatAmountSheetTests(unittest.TestCase):
+    def test_same_amount_sorts_by_cheque_then_date_when_cheque_missing(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {"Sno": 1, "Date": "05/01/2026", "Details": "blank later", "Detail_Clean": "blank later", "Cheque No": "", "Debit": 100.0, "Credit": 0.0, "Balance": 900.0, "Source": "sample.pdf"},
+                {"Sno": 2, "Date": "02/01/2026", "Details": "cheque high", "Detail_Clean": "cheque high", "Cheque No": "20", "Debit": 100.0, "Credit": 0.0, "Balance": 800.0, "Source": "sample.pdf"},
+                {"Sno": 3, "Date": "01/01/2026", "Details": "blank earlier", "Detail_Clean": "blank earlier", "Cheque No": "", "Debit": 100.0, "Credit": 0.0, "Balance": 700.0, "Source": "sample.pdf"},
+                {"Sno": 4, "Date": "03/01/2026", "Details": "cheque low", "Detail_Clean": "cheque low", "Cheque No": "10", "Debit": 100.0, "Credit": 0.0, "Balance": 600.0, "Source": "sample.pdf"},
+            ],
+            columns=OUTPUT_COLUMNS,
+        )
+
+        result = _build_repeat_sheet(frame, "Debit")
+
+        self.assertEqual(result["Sno"].tolist(), [4, 2, 3, 1])
 
 class ReturnRejectSheetTests(unittest.TestCase):
     def test_build_return_reject_sheet_keeps_only_related_rows(self) -> None:
