@@ -24,7 +24,7 @@ CREDIT_AMOUNT_MAX_LEFT = 860
 BALANCE_COL_MIN_LEFT = 1000
 TABLE_HEADER_RE = re.compile(r"^DATE\b.*\bBALANCE$", re.IGNORECASE)
 DATE_TOKEN_RE = re.compile(r"^[0-9A-Za-z]{2}[-/][0-9A-Za-z]{2}[-/][0-9A-Za-z]{4}$")
-AMOUNT_TOKEN_RE = re.compile(r"^[0-9OIlSBQDo,\.]+$")
+AMOUNT_TOKEN_RE = re.compile(r"^-?[0-9OIlSBQDo,\.]+$")
 NEXT_PREFIX_RE = re.compile(
     r"(UPI|UPV|NEFT|IMPS|RTGS|ATM|NACH|ACH|POS|CHEQ|CHQ|PAY|BANK|UNION|VYSA)",
     re.IGNORECASE,
@@ -32,6 +32,8 @@ NEXT_PREFIX_RE = re.compile(
 TEXT_LINE_TOLERANCE = 3.0
 TEXT_SERIAL_RE = re.compile(r"^\d+$")
 TEXT_AMOUNT_RE = re.compile(r"^-?[0-9,]+\.\d{2}$")
+TEXT_WRAPPED_DATE_PREFIX_RE = re.compile(r"^\d{2}-[A-Za-z]{3}-$")
+TEXT_DATE_YEAR_RE = re.compile(r"^\d{4}$")
 TEXT_PAGE_FOOTER_RE = re.compile(r"^PAGE\s+\d+\s+OF\s+\d+$", re.IGNORECASE)
 TEXT_FOOTER_PREFIXES = (
     "WWW.ICICI.BANK.IN",
@@ -58,6 +60,14 @@ TEXT_DETAILED_AMOUNT_MIN_LEFT = 390.0
 TEXT_DETAILED_AMOUNT_MAX_LEFT = 470.0
 TEXT_DETAILED_BALANCE_MIN_LEFT = 470.0
 TEXT_DETAILED_CREDIT_MAX_LEFT = 425.0
+TEXT_ACCOUNT_SERIAL_MAX_LEFT = 100.0
+TEXT_ACCOUNT_DATE_MIN_LEFT = 150.0
+TEXT_ACCOUNT_DATE_MAX_LEFT = 230.0
+TEXT_ACCOUNT_DETAIL_MIN_LEFT = 290.0
+TEXT_ACCOUNT_AMOUNT_MIN_LEFT = 350.0
+TEXT_ACCOUNT_AMOUNT_MAX_LEFT = 470.0
+TEXT_ACCOUNT_BALANCE_MIN_LEFT = 470.0
+TEXT_ACCOUNT_DEFAULT_CREDIT_THRESHOLD = 400.0
 TEXT_SUMMARY_BALANCE_PATTERNS = {
     "opening": re.compile(r"Opening\s+Bal:\s*-?\s*([0-9,]+\.\d{2})", re.IGNORECASE),
     "closing": re.compile(r"Closing\s+Bal:\s*-?\s*([0-9,]+\.\d{2})", re.IGNORECASE),
@@ -350,6 +360,147 @@ def _normalize_text_date(raw_value: str) -> str:
     if parsed is not None:
         return parsed.strftime("%d/%m/%Y")
     return raw_value.replace(".", "/")
+
+
+def _is_account_statement_text_layout(lines: list[TextLine]) -> bool:
+    upper = " ".join(_text_line_text(line).upper() for line in lines)
+    return (
+        ("S.NO" in upper or "S NO" in upper)
+        and "TRANSACTION" in upper
+        and "DESCRIPTION" in upper
+        and "WITHDRAWAL" in upper
+        and "DEPOSIT" in upper
+        and "AVAILABLE" in upper
+        and "BALANCE" in upper
+    )
+
+
+def _is_account_statement_block_start(line: TextLine) -> bool:
+    if not line.tokens:
+        return False
+    first_left, first_text = line.tokens[0]
+    return first_left <= TEXT_ACCOUNT_SERIAL_MAX_LEFT and TEXT_SERIAL_RE.match(first_text) is not None
+
+
+def _is_account_statement_footer(line: TextLine) -> bool:
+    upper = _text_line_text(line).upper()
+    return (
+        upper.startswith("GENERATED ON")
+        or upper.startswith("LEGENDS USED IN ACCOUNT STATEMENT")
+        or upper.startswith("*THIS IS A SYSTEM-GENERATED")
+    )
+
+
+def _extract_account_statement_blocks(lines: list[TextLine]) -> list[list[TextLine]]:
+    blocks: list[list[TextLine]] = []
+    current_block: list[TextLine] = []
+
+    for line in lines:
+        if _is_account_statement_footer(line):
+            if current_block:
+                blocks.append(current_block)
+                current_block = []
+            break
+
+        if _is_account_statement_block_start(line):
+            if current_block:
+                blocks.append(current_block)
+            current_block = [line]
+            continue
+
+        if current_block:
+            current_block.append(line)
+
+    if current_block:
+        blocks.append(current_block)
+
+    return blocks
+
+
+def _extract_account_statement_date(block_lines: list[TextLine]) -> str:
+    date_tokens = [
+        clean_cell(text)
+        for line in block_lines
+        for left, text in line.tokens
+        if TEXT_ACCOUNT_DATE_MIN_LEFT <= left < TEXT_ACCOUNT_DATE_MAX_LEFT
+    ]
+
+    for token in date_tokens:
+        if _is_text_date_token(token):
+            return token
+
+    for index, token in enumerate(date_tokens[:-1]):
+        if TEXT_WRAPPED_DATE_PREFIX_RE.match(token) and TEXT_DATE_YEAR_RE.match(date_tokens[index + 1]):
+            candidate = f"{token}{date_tokens[index + 1]}"
+            if _is_text_date_token(candidate):
+                return candidate
+
+    return ""
+
+
+def _extract_account_statement_block_seed(block_lines: list[TextLine]) -> TextRecordSeed | None:
+    raw_date = _extract_account_statement_date(block_lines)
+    amount_tokens: list[str] = []
+    balance_tokens: list[str] = []
+    detail_tokens: list[str] = []
+    amount_left: float | None = None
+
+    for line in block_lines:
+        for left, text in line.tokens:
+            if (
+                TEXT_ACCOUNT_AMOUNT_MIN_LEFT <= left < TEXT_ACCOUNT_AMOUNT_MAX_LEFT
+                and _looks_like_amount_token(text)
+            ):
+                amount_tokens.append(text)
+                amount_left = left if amount_left is None else min(amount_left, left)
+                continue
+
+            if left >= TEXT_ACCOUNT_BALANCE_MIN_LEFT and (_looks_like_amount_token(text) or text == "-"):
+                balance_tokens.append(text)
+                continue
+
+            if TEXT_ACCOUNT_DETAIL_MIN_LEFT <= left < TEXT_ACCOUNT_AMOUNT_MIN_LEFT:
+                detail_tokens.append(text)
+
+    amount_text = _merge_numeric_column_tokens(amount_tokens)
+    balance_text = _merge_numeric_column_tokens(balance_tokens)
+    detail_text = clean_cell(" ".join(detail_tokens))
+
+    if not raw_date or not amount_text or not balance_text or not detail_text:
+        return None
+
+    return TextRecordSeed(
+        top=block_lines[0].top,
+        raw_date=raw_date,
+        amount_text=amount_text,
+        amount_left=amount_left or TEXT_ACCOUNT_AMOUNT_MAX_LEFT,
+        balance_text=balance_text,
+        inline_detail=detail_text,
+    )
+
+
+def _detect_account_statement_credit_threshold(lines: list[TextLine]) -> float:
+    withdrawal_left = next(
+        (
+            left
+            for line in lines
+            for left, text in line.tokens
+            if text.upper().startswith("WITHDRAWAL") or text.upper().startswith("WITHDRAWL")
+        ),
+        None,
+    )
+    deposit_left = next(
+        (
+            left
+            for line in lines
+            for left, text in line.tokens
+            if text.upper().startswith("DEPOSIT")
+        ),
+        None,
+    )
+    if withdrawal_left is not None and deposit_left is not None:
+        return (withdrawal_left + deposit_left) / 2.0
+    return TEXT_ACCOUNT_DEFAULT_CREDIT_THRESHOLD
 
 
 def _extract_icici_cheque_no(detail_text: str) -> str:
@@ -726,6 +877,55 @@ def _parse_text(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]
     logger.info("ICICI text parse complete: rows=%s", len(records))
     return records
 
+def _parse_account_statement_text(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
+    logger.info("Checking ICICI account-statement text layout: %s", pdf_path)
+
+    records: list[dict[str, Any]] = []
+    previous_balance: float | None = None
+    layout_seen = False
+    credit_threshold = TEXT_ACCOUNT_DEFAULT_CREDIT_THRESHOLD
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_idx, page in enumerate(pdf.pages, start=1):
+            lines = _extract_text_lines(page, page_idx, logger)
+            if not lines:
+                continue
+
+            if _is_account_statement_text_layout(lines):
+                layout_seen = True
+                credit_threshold = _detect_account_statement_credit_threshold(lines)
+
+            if not layout_seen:
+                continue
+
+            blocks = _extract_account_statement_blocks(lines)
+            logger.debug(
+                "ICICI account-statement page %s: identified %s transaction block(s)",
+                page_idx,
+                len(blocks),
+            )
+            for block in blocks:
+                seed = _extract_account_statement_block_seed(block)
+                if seed is None:
+                    continue
+
+                record, previous_balance = _finalize_text_record(
+                    seed,
+                    previous_balance,
+                    credit_threshold,
+                    logger,
+                )
+                records.append(record)
+                if progress_cb is not None:
+                    progress_cb(len(records))
+
+    for index, record in enumerate(records, start=1):
+        record["Sno"] = index
+
+    logger.info("ICICI account-statement text parse complete: rows=%s", len(records))
+    return records
+
+
 def _looks_like_amount_token(text: str) -> bool:
     return bool(AMOUNT_TOKEN_RE.match(text)) and any(ch.isdigit() for ch in text)
 
@@ -993,6 +1193,10 @@ def _parse_ocr(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
 
 
 def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
+    account_statement_records = _parse_account_statement_text(pdf_path, logger, progress_cb)
+    if account_statement_records:
+        return account_statement_records
+
     detailed_text_records = _parse_detailed_text(pdf_path, logger, progress_cb)
     if detailed_text_records:
         return detailed_text_records

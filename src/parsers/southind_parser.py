@@ -27,7 +27,9 @@ CHEQUE_COLUMN_MAX_X = 335
 WITHDRAWAL_COLUMN_MIN_X = 335
 WITHDRAWAL_COLUMN_MAX_X = 445
 DEPOSIT_COLUMN_MIN_X = 445
-DEPOSIT_COLUMN_MAX_X = 520
+# Legacy statements place balances around x=513, while newer variants use x=520+.
+# Keep the boundary below both layouts without overlapping deposits near x=445-465.
+DEPOSIT_COLUMN_MAX_X = 500
 LINE_GROUP_TOLERANCE = 2.5
 
 SLNO_SERIAL_COLUMN_MAX_X = 35

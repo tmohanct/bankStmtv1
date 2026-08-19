@@ -137,6 +137,39 @@ class SouthIndRegressionTests(unittest.TestCase):
         self.assertNotIn("f9#919944128777#D", records[1]["Details"])
         self.assertEqual(records[1]["Details"], "MOB/359114508789/salary/ IMPS/")
 
+    def test_legacy_layout_accepts_balance_starting_at_x513(self) -> None:
+        pending = _PendingRecord(date_text="01-01-26")
+        pending.add_line(
+            _WordLine(
+                y_center=287.86,
+                words=[
+                    (23.0, "01-01-26"),
+                    (87.0, "UPI/UBIN/RRN-636744839102/ANANDHAN"),
+                ],
+            )
+        )
+        pending.add_line(
+            _WordLine(
+                y_center=297.17,
+                words=[
+                    (87.0, "SHANMUGAM/UPI"),
+                    (457.86, "2,300.00"),
+                    (513.19, "-32,22,182.05Dr"),
+                ],
+            )
+        )
+
+        record = pending.finalize()
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record["Date"], "01/01/2026")
+        self.assertEqual(record["Details"], "UPI/UBIN/RRN-636744839102/ANANDHAN SHANMUGAM/UPI")
+        self.assertIsNone(record["Debit"])
+        self.assertEqual(record["Credit"], 2300.0)
+        self.assertEqual(record["Balance"], -3222182.05)
+
+
     def test_shifted_balance_credit_row_is_not_dropped(self) -> None:
         pending = _PendingRecord(date_text="19-11-25")
         pending.add_line(

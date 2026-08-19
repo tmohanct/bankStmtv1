@@ -12,7 +12,8 @@ import pdfplumber
 from parsers.base_parser import BaseStatementParser
 from utils.amount_utils import parse_amount
 
-ACCOUNT_NUMBER_RE = re.compile(r"Account\s+No\s*:\s*([0-9A-Za-z]+)", re.IGNORECASE)
+ACCOUNT_NUMBER_RE = re.compile(r"Account\s+(?:No|Number)\s*[:\-]\s*([0-9A-Za-z]+)", re.IGNORECASE)
+IOB_CODE_VALUES = {"TRF", "CSH", "CLR"}
 OUTPUT_COLUMNS = [
     "Date",
     "ValueDate",
@@ -38,7 +39,7 @@ def _parse_date_token(raw_value: str) -> str | None:
     if not text:
         return None
 
-    for fmt in ("%d-%b-%y", "%d-%b-%Y"):
+    for fmt in ("%d-%b-%y", "%d-%b-%Y", "%d/%m/%y", "%d/%m/%Y"):
         try:
             return datetime.strptime(text, fmt).strftime("%d/%m/%Y")
         except ValueError:
@@ -84,11 +85,25 @@ def _build_record(row: list[object], page_number: int, account_number: str | Non
     if txn_date is None:
         return None
 
-    narration = _clean_cell(row[1])
-    txn_ref = _clean_cell(row[2])
-    debit = parse_amount(row[4])
-    credit = parse_amount(row[5])
-    balance = parse_amount(row[6])
+    if len(row) >= 8 and _parse_date_token(_clean_cell(row[1])) is not None:
+        value_date = _parse_date_token(_clean_cell(row[1])) or value_date
+        narration = _clean_cell(row[3])
+        txn_ref = _clean_cell(row[2])
+        debit = parse_amount(row[5])
+        credit = parse_amount(row[6])
+        balance = parse_amount(row[7])
+    elif len(row) >= 7 and _clean_cell(row[3]).upper() in IOB_CODE_VALUES:
+        narration = _clean_cell(row[2])
+        txn_ref = _clean_cell(row[1])
+        debit = parse_amount(row[4])
+        credit = parse_amount(row[5])
+        balance = parse_amount(row[6])
+    else:
+        narration = _clean_cell(row[1])
+        txn_ref = _clean_cell(row[2])
+        debit = parse_amount(row[4])
+        credit = parse_amount(row[5])
+        balance = parse_amount(row[6])
 
     return {
         "Date": txn_date,

@@ -8,8 +8,12 @@ import pdfplumber
 from parser_helpers import build_record
 from utils import clean_cell, parse_amount
 
-DATE_RE = re.compile(r"(\d{2}-[A-Z]{3}-(?:\d{2}|\d{4}))", re.IGNORECASE)
-DATE_FORMATS = ("%d-%b-%y", "%d-%b-%Y")
+DATE_RE = re.compile(
+    r"(\d{2}-[A-Z]{3}-(?:\d{4}|\d{2})|\d{2}/\d{2}/(?:\d{4}|\d{2}))",
+    re.IGNORECASE,
+)
+DATE_FORMATS = ("%d-%b-%Y", "%d-%b-%y", "%d/%m/%Y", "%d/%m/%y")
+IOB_CODE_VALUES = {"TRF", "CSH", "CLR"}
 
 
 def _extract_primary_date(value: str) -> str:
@@ -21,6 +25,40 @@ def _extract_primary_date(value: str) -> str:
 
 def _is_transaction_row(row: list[str]) -> bool:
     return len(row) >= 7 and bool(_extract_primary_date(row[0]))
+
+
+def _build_iob_record(row: list[str]) -> dict[str, Any]:
+    if len(row) >= 8 and _extract_primary_date(row[1]):
+        return build_record(
+            date_text=_extract_primary_date(row[0]),
+            details=row[3],
+            cheque_no=row[2],
+            debit=parse_amount(row[5]),
+            credit=parse_amount(row[6]),
+            balance=parse_amount(row[7]),
+            date_formats=DATE_FORMATS,
+        )
+
+    if len(row) >= 7 and row[3].upper() in IOB_CODE_VALUES:
+        return build_record(
+            date_text=_extract_primary_date(row[0]),
+            details=row[2],
+            cheque_no=row[1],
+            debit=parse_amount(row[4]),
+            credit=parse_amount(row[5]),
+            balance=parse_amount(row[6]),
+            date_formats=DATE_FORMATS,
+        )
+
+    return build_record(
+        date_text=_extract_primary_date(row[0]),
+        details=row[1],
+        cheque_no=row[2],
+        debit=parse_amount(row[4]),
+        credit=parse_amount(row[5]),
+        balance=parse_amount(row[6]),
+        date_formats=DATE_FORMATS,
+    )
 
 
 def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
@@ -40,15 +78,7 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
                     if not any(row) or not _is_transaction_row(row):
                         continue
 
-                    record = build_record(
-                        date_text=_extract_primary_date(row[0]),
-                        details=row[1],
-                        cheque_no=row[2],
-                        debit=parse_amount(row[4]),
-                        credit=parse_amount(row[5]),
-                        balance=parse_amount(row[6]),
-                        date_formats=DATE_FORMATS,
-                    )
+                    record = _build_iob_record(row)
                     records.append(record)
                     if progress_cb is not None:
                         progress_cb(len(records))
