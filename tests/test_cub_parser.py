@@ -12,19 +12,21 @@ sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 import cub_parser
 from utils import is_date_token, normalize_date
 
+SAMPLE_PDF = PROJECT_ROOT / "input" / "VAIRAKANNU.pdf"
+
 
 class CubParserTests(unittest.TestCase):
     def test_month_abbreviation_dates_are_normalized(self) -> None:
         self.assertEqual(normalize_date("01-NOV-2025"), "01/11/2025")
         self.assertTrue(is_date_token("01-NOV-2025"))
 
+    @unittest.skipUnless(SAMPLE_PDF.is_file(), "City Union Bank sample PDF is required for this regression test.")
     def test_cub_parser_reads_vairakannu_statement(self) -> None:
-        pdf_path = PROJECT_ROOT / "input" / "VAIRAKANNU.pdf"
         logger = logging.getLogger("tests.cub_parser")
         logger.handlers.clear()
         logger.addHandler(logging.NullHandler())
 
-        records = cub_parser.parse(str(pdf_path), logger)
+        records = cub_parser.parse(str(SAMPLE_PDF), logger)
 
         self.assertEqual(len(records), 80)
         self.assertEqual(sum(record["Debit"] is not None for record in records), 11)

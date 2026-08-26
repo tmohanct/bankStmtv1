@@ -32,7 +32,6 @@ bankStmtv1/input/*.rar
 bankStmtv1/input/*.RAR
 bankStmtv1/input/*.xlsx
 bankStmtv1/input/*.XLSX
-!bankStmtv1/input/Rules.xlsx
 output/
 
 
@@ -52,6 +51,9 @@ node_modules/
 *.pdf
 *.PDF
 *.log
+*.xlsx
+*.xls
+!input/Rules.xlsx
 
 # Unit test / coverage reports
 htmlcov/

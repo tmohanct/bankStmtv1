@@ -10,7 +10,7 @@ import pandas as pd
 import pdfplumber
 
 from parsers.base_parser import BaseStatementParser
-from utils.amount_utils import parse_amount
+from src.utils.amount_utils import parse_amount
 
 ACCOUNT_NUMBER_RE = re.compile(r"Account\s+(?:No|Number)\s*[:\-]\s*([0-9A-Za-z]+)", re.IGNORECASE)
 IOB_CODE_VALUES = {"TRF", "CSH", "CLR"}

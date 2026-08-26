@@ -12,15 +12,17 @@ sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 import bank_detector
 import bom_parser
 
+SAMPLE_PDF = PROJECT_ROOT / "input" / "bom.pdf"
+
 
 class BomParserTests(unittest.TestCase):
+    @unittest.skipUnless(SAMPLE_PDF.is_file(), "Bank of Maharashtra sample PDF is required for this regression test.")
     def test_bom_parser_reads_sample_statement(self) -> None:
-        pdf_path = PROJECT_ROOT / "input" / "bom.pdf"
         logger = logging.getLogger("tests.bom_parser")
         logger.handlers.clear()
         logger.addHandler(logging.NullHandler())
 
-        records = bom_parser.parse(str(pdf_path), logger)
+        records = bom_parser.parse(str(SAMPLE_PDF), logger)
 
         self.assertEqual(len(records), 446)
 

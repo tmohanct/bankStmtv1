@@ -12,11 +12,14 @@ sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 import bank_detector
 import boi_parser
 
+SAMPLE_PDF = PROJECT_ROOT / "input" / "IndianBank.pdf"
 
+
+@unittest.skipUnless(SAMPLE_PDF.is_file(), "Bank of India sample PDF is required for this regression test.")
 class BOIParserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.pdf_path = PROJECT_ROOT / "input" / "IndianBank.pdf"
+        cls.pdf_path = SAMPLE_PDF
         cls.logger = logging.getLogger("tests.boi_parser")
         cls.logger.handlers.clear()
         cls.logger.addHandler(logging.NullHandler())

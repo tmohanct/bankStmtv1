@@ -11,11 +11,6 @@ sys.path.insert(0, CODE_ROOT)
 
 import iob_parser
 
-if sys.path and sys.path[0] == CODE_ROOT:
-    sys.path.pop(0)
-for module_name in ("utils", "parser_helpers"):
-    sys.modules.pop(module_name, None)
-
 SAMPLE_PDF = PROJECT_ROOT / "input" / "AKILANMANIVANNAN.pdf"
 NEW_LAYOUT_SAMPLE_PDF = PROJECT_ROOT / "input" / "IOI.pdf"
 COD_LAYOUT_SAMPLE_PDF = PROJECT_ROOT / "input" / "iob.pdf"
