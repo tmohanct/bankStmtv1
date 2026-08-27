@@ -14,6 +14,7 @@ import pdfplumber
 import pytesseract
 from PIL import Image
 
+from src.parsers.icici_parser import parse_savings_transaction_layout
 from utils import clean_cell, clean_detail, parse_amount
 
 RENDER_ZOOM = 2.0
@@ -1196,6 +1197,12 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
     account_statement_records = _parse_account_statement_text(pdf_path, logger, progress_cb)
     if account_statement_records:
         return account_statement_records
+
+    savings_transaction_records = parse_savings_transaction_layout(pdf_path, logger, progress_cb)
+    if savings_transaction_records:
+        for record in savings_transaction_records:
+            record["Cheque No"] = _extract_icici_cheque_no(record["Details"])
+        return savings_transaction_records
 
     detailed_text_records = _parse_detailed_text(pdf_path, logger, progress_cb)
     if detailed_text_records:

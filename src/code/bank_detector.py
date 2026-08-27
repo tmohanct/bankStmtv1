@@ -30,7 +30,12 @@ BANK_SIGNATURES: dict[str, tuple[tuple[str, int], ...]] = {
     ),
     "federal": (("FEDERAL BANK", 4), ("FDRL0", 3)),
     "hdfc": (("HDFC BANK", 4), ("HDFC0", 3)),
-    "icici": (("ICICI BANK", 4), ("ICIC0", 3)),
+    "icici": (
+        ("ICICI BANK", 4),
+        ("ICIC0", 3),
+        ("WWW.ICICIBANK.COM", 10),
+        ("STATEMENT OF TRANSACTIONS IN SAVINGS ACCOUNT NUMBER", 5),
+    ),
     "idbi": (("IDBI BANK", 4), ("IBKL0", 3), ("YOUR A/C STATUS", 1)),
     "idfc": (("IDFC FIRST BANK", 4), ("IDFB0", 3)),
     "indian": (("IDIB0", 5), ("ACCOUNT STATEMENT", 2), ("ACCOUNT ACTIVITY", 2)),
