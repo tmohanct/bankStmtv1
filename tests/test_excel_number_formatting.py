@@ -70,18 +70,22 @@ class ExcelNumberFormattingTests(unittest.TestCase):
 
             workbook = load_workbook(final_path)
 
+            for worksheet in workbook.worksheets:
+                headers = [cell.value for cell in worksheet[1]]
+                self.assertNotIn("Detail_Clean", headers, worksheet.title)
+
             statement_ws = workbook["Statement"]
-            self.assertEqual(statement_ws["F2"].value, 70000)
-            self.assertEqual(statement_ws["F2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
-            self.assertEqual(statement_ws["H2"].value, -5498056)
-            self.assertEqual(statement_ws["H2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
-            self.assertEqual(statement_ws["G3"].value, 2721)
-            self.assertEqual(statement_ws["G3"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
+            self.assertEqual(statement_ws["E2"].value, 70000)
+            self.assertEqual(statement_ws["E2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
+            self.assertEqual(statement_ws["G2"].value, -5498056)
+            self.assertEqual(statement_ws["G2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
+            self.assertEqual(statement_ws["F3"].value, 2721)
+            self.assertEqual(statement_ws["F3"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
 
             ret_rej_ws = workbook["Ret_Rej"]
-            self.assertEqual(ret_rej_ws["F2"].value, 70000)
-            self.assertEqual(ret_rej_ws["H2"].value, -5498056)
-            self.assertEqual(ret_rej_ws["F2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
+            self.assertEqual(ret_rej_ws["E2"].value, 70000)
+            self.assertEqual(ret_rej_ws["G2"].value, -5498056)
+            self.assertEqual(ret_rej_ws["E2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
 
             month_ws = workbook["month_dr_cr"]
             self.assertEqual(month_ws["B2"].value, 70000)

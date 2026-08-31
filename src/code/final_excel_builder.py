@@ -82,6 +82,7 @@ MONTH_DR_CR_FOOTNOTE = "#.OF Dr/Cr & Avg takes only amount Greater than 30. Less
 MONTH_DR_CR_CHART_IMAGE_SIZE = (1120, 520)
 MONTH_DR_CR_DATA_LABEL_FONT_SIZE = 13
 MONTH_DR_CR_EXCEL_DATA_LABEL_FONT_SIZE = 12
+FINAL_EXCLUDED_COLUMNS = ("Detail_Clean",)
 C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -202,6 +203,11 @@ def _ensure_columns(frame: pd.DataFrame) -> pd.DataFrame:
         output[amount_col] = pd.to_numeric(output[amount_col], errors="coerce").fillna(0.0)
     output = sanitize_cheque_column(output)
     return output[OUTPUT_COLUMNS]
+
+
+def _exclude_final_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep internal matching columns out of every final workbook sheet."""
+    return frame.drop(columns=list(FINAL_EXCLUDED_COLUMNS), errors="ignore")
 
 
 def _first_present_column(lower_map: dict[str, Any], *keys: str) -> Any | None:
@@ -2393,17 +2399,18 @@ def build_final_workbook(
         for requested_name, frame in planned_sheets:
             safe_name = _unique_sheet_name(requested_name, used_names)
             normalized_sheet_names[requested_name] = safe_name
+            display_frame = _exclude_final_columns(frame)
             if requested_name == PDF_STATUS_SHEET_NAME:
-                frame.to_excel(
+                display_frame.to_excel(
                     writer,
                     sheet_name=safe_name,
                     index=False,
                     startrow=PDF_STATUS_TABLE_START_ROW - 1,
                 )
             elif requested_name == "month_dr_cr":
-                frame.to_excel(writer, sheet_name=safe_name, index=False)
+                display_frame.to_excel(writer, sheet_name=safe_name, index=False)
             else:
-                _ensure_columns(frame).to_excel(writer, sheet_name=safe_name, index=False)
+                _exclude_final_columns(_ensure_columns(frame)).to_excel(writer, sheet_name=safe_name, index=False)
 
     workbook = load_workbook(final_path)
     _apply_base_style(workbook)

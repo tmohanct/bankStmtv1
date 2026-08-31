@@ -46,6 +46,7 @@ from utils import (
     prepare_pdf_for_reading,
     reconcile,
     records_to_dataframe,
+    remove_exact_duplicate_transactions,
     resolve_pdf_path,
     split_pdf_filename_metadata,
     write_output_excel,
@@ -400,12 +401,23 @@ def main(argv=None) -> int:
         if not saw_progress:
             print("\rProcessing row : 0")
 
-        for row_number, row in enumerate(merged_records, start=1):
-            row["Sno"] = row_number
-
         logger.info("Total merged rows parsed: %s", len(merged_records))
 
         statement_df = records_to_dataframe(merged_records)
+        rows_before_deduplication = len(statement_df)
+        statement_df = remove_exact_duplicate_transactions(statement_df).reset_index(drop=True)
+        statement_df["Sno"] = range(1, len(statement_df) + 1)
+        duplicates_removed = rows_before_deduplication - len(statement_df)
+        if duplicates_removed:
+            print(
+                f"Removed exact duplicate transactions: {duplicates_removed}",
+                flush=True,
+            )
+            logger.info(
+                "Removed %s exact duplicate transaction row(s) from merged statements",
+                duplicates_removed,
+            )
+
         intermediate_output = output_dir / "output.xlsx"
         print(f"Writing merged intermediate workbook: {intermediate_output}", flush=True)
         write_output_excel(statement_df, intermediate_output)

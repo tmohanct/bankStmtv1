@@ -20,6 +20,7 @@ OUTPUT_COLUMNS = [
     "Balance",
     "Source",
 ]
+DEDUPLICATION_EXCLUDED_COLUMNS = frozenset({"Sno", "Source"})
 
 DATE_FORMATS = (
     "%d/%m/%Y",
@@ -436,6 +437,21 @@ def records_to_dataframe(records: list[dict[str, Any]]) -> pd.DataFrame:
             frame[col] = None
     frame = frame[OUTPUT_COLUMNS]
     return sanitize_cheque_column(frame)
+
+
+def remove_exact_duplicate_transactions(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep the first of transactions identical in every non-bookkeeping field.
+
+    ``Sno`` is regenerated for the merged statement and ``Source`` identifies the
+    PDF that supplied a row.  Neither describes the transaction itself, so they
+    must not stop matching rows from overlapping statements being deduplicated.
+    """
+    comparison_columns = [
+        column for column in frame.columns if column not in DEDUPLICATION_EXCLUDED_COLUMNS
+    ]
+    if not comparison_columns:
+        return frame.copy()
+    return frame.drop_duplicates(subset=comparison_columns, keep="first").copy()
 
 
 def _force_leading_equals_to_text(workbook) -> None:
