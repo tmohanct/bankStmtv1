@@ -8,8 +8,10 @@ import pdfplumber
 from parser_helpers import build_record
 from utils import clean_cell, parse_amount
 
-DATE_RE = re.compile(r"^\d{2}-[A-Z]{3}-\s*\d{4}$")
-DATE_FORMATS = ("%d-%b-%Y",)
+DATE_RE = re.compile(
+    r"^(?:\d{2}-[A-Z]{3}-\s*\d{4}|\d{2}[-/]\d{2}[-/]\d{4})$"
+)
+DATE_FORMATS = ("%d-%b-%Y", "%d-%m-%Y", "%d/%m/%Y")
 OLD_FORMAT_COLUMNS = {
     "date": 0,
     "details": 2,

@@ -44,7 +44,13 @@ BANK_SIGNATURES: dict[str, tuple[tuple[str, int], ...]] = {
     "kvb": (("KARUR VYSYA BANK", 4), ("KVBL0", 3)),
     "kotak": (("KOTAK MAHINDRA BANK", 4), ("KKBK", 3), ("CURRENT ACCOUNT TRANSACTIONS", 1)),
     "pnb": (("PUNJAB NATIONAL BANK", 4), ("PUNB0", 3)),
-    "sbi": (("STATE BANK OF INDIA", 4), ("SBIN0", 3)),
+    "sbi": (
+        ("STATE BANK OF INDIA", 4),
+        ("IFS CODE :SBIN", 5),
+        ("IFS CODE: SBIN", 5),
+        ("SBIN0", 3),
+        ("SBINO", 3),
+    ),
     "southind": (("SOUTH INDIAN BANK", 4), ("SIBL", 3), ("STATEMENT OF ACCOUNT", 1)),
     "unionbank": (("UNION BANK", 4), ("UBIN", 3), ("TRANSACTION ID", 1)),
 }

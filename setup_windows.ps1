@@ -377,7 +377,7 @@ if (-not $SkipTesseract) {
     if (-not $tesseractPath) {
         $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
         if ($wingetCmd) {
-            Write-Host 'Tesseract not found. Installing with winget because ICICI parser needs OCR.'
+            Write-Host 'Tesseract not found. Installing with winget because ICICI and scanned SBI statements need OCR.'
             Invoke-Checked @(
                 $wingetCmd.Source,
                 'install',
@@ -400,7 +400,7 @@ if (-not $SkipTesseract) {
         Write-Host 'Saved TESSERACT_CMD for the current Windows user.'
     }
     else {
-        Write-Warning 'Tesseract is still not available. Axis, CUB, HDFC, IDBI, and SBI can run, but ICICI will not work until Tesseract is installed.'
+        Write-Warning 'Tesseract is still not available. Text-based SBI statements can run, but scanned SBI and ICICI statements will not work until Tesseract is installed.'
     }
 }
 else {

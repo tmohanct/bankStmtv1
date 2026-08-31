@@ -129,6 +129,47 @@ class FederalParserUnitTests(unittest.TestCase):
         self.assertIsNone(records[0]["Credit"])
         self.assertEqual(records[0]["Balance"], 10739.26)
 
+    def test_parses_numeric_date_layout_used_by_new_federal_statement(self) -> None:
+        table = [
+            [
+                "Date",
+                "Value Date",
+                "Particulars",
+                "Tran Type",
+                "Tran ID",
+                "Cheque Details",
+                "Withdrawals",
+                "Deposits",
+                "Balance",
+                "Balance Type (Cr/Dr)",
+            ],
+            [
+                "01-08-2025",
+                "01-08-2025",
+                "CHRG/CASHHAND CDM/17800 30-07-2025 S75525813",
+                "TRF",
+                "S4159946",
+                "",
+                "59.00",
+                "",
+                "16,219.62",
+                "CR",
+            ],
+        ]
+
+        with patch.object(
+            federal_parser.pdfplumber,
+            "open",
+            return_value=_FakePdf([_FakePage([table])]),
+        ):
+            records = federal_parser.parse("dummy.pdf", self.logger)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["Date"], "01/08/2025")
+        self.assertEqual(records[0]["Debit"], 59.0)
+        self.assertIsNone(records[0]["Credit"])
+        self.assertEqual(records[0]["Balance"], 16219.62)
+
     def test_balance_suffix_is_used_when_indicator_column_is_absent(self) -> None:
         self.assertEqual(federal_parser._parse_balance("250.00 Dr"), -250.0)
         self.assertEqual(federal_parser._parse_balance("250.00DR"), -250.0)
