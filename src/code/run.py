@@ -26,6 +26,7 @@ import canara_parser
 import centralbank_parser
 import cub_parser
 import dbs_parser
+import esfb_parser
 import federal_parser
 import hdfc_parser
 import icici_parser
@@ -64,6 +65,7 @@ PARSERS = {
     "central": centralbank_parser.parse,
     "cub": cub_parser.parse,
     "dbs": dbs_parser.parse,
+    "esfb": esfb_parser.parse,
     "federal": federal_parser.parse,
     "hdfc": hdfc_parser.parse,
     "icici": icici_parser.parse,
@@ -81,6 +83,7 @@ PARSERS = {
     "unionbank": unionbank_parser.parse,
 }
 SUPPORTED_BANK_CODES = "/".join(sorted(PARSERS))
+BANK_ALIASES = {"equitas": "esfb"}
 
 
 class CliParser(argparse.ArgumentParser):
@@ -295,6 +298,7 @@ def main(argv=None) -> int:
     args = parse_args(argv)
 
     requested_bank = args.bank.strip().lower() if args.bank else None
+    requested_bank = BANK_ALIASES.get(requested_bank, requested_bank)
     if requested_bank and requested_bank not in PARSERS:
         supported = ", ".join(sorted(PARSERS.keys()))
         print(f"Error: Unsupported bank '{args.bank}'. Supported banks: {supported}")

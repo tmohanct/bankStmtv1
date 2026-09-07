@@ -28,6 +28,11 @@ BANK_SIGNATURES: dict[str, tuple[tuple[str, int], ...]] = {
         ("EARMARK AMOUNT", 6),
         ("TRANS. DATE VALUE DATE TRANSACTION DETAILS DEBITS CREDITS RUNNING BALANCE", 10),
     ),
+    "esfb": (
+        ("EQUITAS SMALL FINANCE BANK", 10),
+        ("ESFB0", 5),
+        ("CUSTOMERSERVICE@EQUITAS.BANK.IN", 5),
+    ),
     "federal": (("FEDERAL BANK", 4), ("FDRL0", 3)),
     "hdfc": (("HDFC BANK", 4), ("HDFC0", 3)),
     "icici": (

@@ -2,7 +2,7 @@
 
 ## 1. Active bank map
 
-The active `PARSERS` dictionary is in `src/code/run.py` and exposes 22 codes.
+The active `PARSERS` dictionary is in `src/code/run.py` and exposes 23 codes.
 
 | Code | Bank | Main extraction approach |
 |---|---|---|
@@ -14,6 +14,7 @@ The active `PARSERS` dictionary is in `src/code/run.py` and exposes 22 codes.
 | `central` | Central Bank of India | Custom `pdfplumber` table parser. |
 | `cub` | City Union Bank | Custom `pdfplumber` tables with CUB date normalization. |
 | `dbs` | DBS Bank | Shared configurable `pdfplumber` table parser. |
+| `esfb` | Equitas Small Finance Bank | Six-column `pdfplumber` table parser with spillover cleanup and balance-continuity validation. |
 | `federal` | Federal Bank | Custom tables supporting multiple known layouts and CR/DR balance indicators. |
 | `hdfc` | HDFC Bank | `pdfplumber` text lines using opening/running balances and summary-count checks. |
 | `icici` | ICICI Bank | Multiple native-text layouts, then rendered-page Tesseract OCR fallback. |
@@ -67,6 +68,7 @@ If content and OCR fail, the filename stem is scored. A filename match is logged
 | `central` | `CENTRAL BANK OF INDIA`, `CBIN0` |
 | `cub` | `CITY UNION BANK`, `CIUB0` |
 | `dbs` | `DBS BANK`, `DBSCPIN` |
+| `esfb` | `EQUITAS SMALL FINANCE BANK`, `ESFB0` |
 | `federal` | `FEDERAL BANK`, `FDRL0` |
 | `hdfc` | `HDFC BANK`, `HDFC0` |
 | `icici` | `ICICI BANK`, `ICIC0` |
@@ -168,7 +170,7 @@ The runner sets `Source` and regenerates `Sno` across merged inputs.
 
 ## 8. Modular registry versus active map
 
-The scaffold registry in `src/parsers/parser_registry.py` contains only `axis`, `boi`, `iob`, `kotak`, `southind`, `tmb`, and `unionbank`. It belongs to `src/main.py`.
+The scaffold registry in `src/parsers/parser_registry.py` contains `axis`, `boi`, `esfb`, `iob`, `kotak`, `southind`, `tmb`, and `unionbank`. It belongs to `src/main.py`.
 
-The user-facing CLI uses the 22-entry `PARSERS` map in `src/code/run.py`. Use that map when determining command support.
+The user-facing CLI uses the 23-entry `PARSERS` map in `src/code/run.py`. Use that map when determining command support. Equitas accepts either `--bank esfb` or the `--bank equitas` alias.
 
