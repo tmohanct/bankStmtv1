@@ -9,10 +9,26 @@ import fitz
 from parser_helpers import build_record
 from utils import clean_cell, parse_amount
 
-DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{4}$")
+DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{4}(?:\s+\d{2}:\d{2}:\d{2})?$")
+VALUE_DATE_RE = re.compile(r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}$")
+DIGITS_RE = re.compile(r"^\d+$")
 AMOUNT_RE = re.compile(r"^-?[0-9,]+\.\d{2}$")
-DATE_FORMATS = ("%d-%m-%Y",)
-HEADER_LINES = {"Date", "Particulars", "Deposits", "Withdrawals", "Balance"}
+DATE_FORMATS = ("%d-%m-%Y %H:%M:%S", "%d-%m-%Y")
+HEADER_LINES = {
+    "Date",
+    "Particulars",
+    "Deposits",
+    "Withdrawals",
+    "Balance",
+    "Txn Date",
+    "Value Date",
+    "Cheque No.",
+    "Description",
+    "Branch",
+    "Code",
+    "Debit",
+    "Credit",
+}
 DETAIL_SKIP_PREFIXES = (
     "page ",
     "computer output-",
@@ -32,6 +48,11 @@ class PendingRecord:
 
 def _is_amount_line(line: str) -> bool:
     return bool(AMOUNT_RE.match(line))
+
+
+def _parse_canara_amount(line: str) -> float | None:
+    normalized = re.sub(r"^\s*RS\.?\s*", "", line, flags=re.IGNORECASE)
+    return parse_amount(normalized)
 
 
 def _should_skip_detail_line(line: str) -> bool:
@@ -93,8 +114,23 @@ def _finalize_record(
     _, balance_value = numeric_lines[-1]
 
     cheque_no = ""
+    candidate_detail_lines = [
+        line
+        for line in pending.lines[:amount_idx]
+        if not _should_skip_detail_line(line)
+    ]
+
+    # Newer Canara current/savings statements put the value date first, then an
+    # optional cheque number, followed by narration and a numeric branch code.
+    if candidate_detail_lines and VALUE_DATE_RE.match(candidate_detail_lines[0]):
+        candidate_detail_lines.pop(0)
+        if candidate_detail_lines and DIGITS_RE.match(candidate_detail_lines[0]):
+            cheque_no = clean_cell(candidate_detail_lines.pop(0))
+        if candidate_detail_lines and DIGITS_RE.match(candidate_detail_lines[-1]):
+            candidate_detail_lines.pop()
+
     detail_parts: list[str] = []
-    for line in pending.lines[:amount_idx]:
+    for line in candidate_detail_lines:
         if _should_skip_detail_line(line):
             continue
         if line.upper().startswith("CHQ:"):
@@ -140,7 +176,7 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
                     continue
 
                 if expect_opening_balance:
-                    opening_balance = parse_amount(line)
+                    opening_balance = _parse_canara_amount(line)
                     expect_opening_balance = False
                     if opening_balance is not None:
                         previous_balance = opening_balance
