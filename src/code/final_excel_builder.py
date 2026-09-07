@@ -71,6 +71,7 @@ INDIAN_NUMBER_FORMAT = "#,##,##0.00"
 INDIAN_NUMBER_FORMAT_NO_DECIMAL = "#,##,##0"
 DATE_NUMBER_FORMAT = "yyyy-mm-dd"
 DATE_INPUT_FORMATS = ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y")
+EXCEL_ILLEGAL_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 AMOUNT_COLUMN_WIDTH = 16
 THIN_BORDER = Border(
     left=Side(style="thin", color="BFBFBF"),
@@ -119,8 +120,18 @@ RETURN_RELATED_CHARGE_MARKERS = (
 ELECTRONIC_RETURN_MARKERS = ("NEFT", "RTGS", "IMPS")
 
 
+def _sanitize_excel_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return EXCEL_ILLEGAL_CONTROL_CHAR_RE.sub("", value)
+
+
+def _sanitize_excel_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.map(_sanitize_excel_value)
+
+
 def _sanitize_sheet_name(name: str) -> str:
-    safe = re.sub(r"[\\/*?:\[\]]", "_", str(name).strip())
+    safe = re.sub(r"[\\/*?:\[\]]", "_", _sanitize_excel_value(str(name)).strip())
     safe = safe or "Sheet"
     return safe[:31]
 
@@ -2251,8 +2262,8 @@ def _apply_pdf_status_style(
     for row_idx, (label, value) in enumerate(account_summary_rows, start=1):
         label_cell = ws.cell(row=row_idx, column=1)
         value_cell = ws.cell(row=row_idx, column=2)
-        label_cell.value = f"{label}:"
-        value_cell.value = value
+        label_cell.value = _sanitize_excel_value(f"{label}:")
+        value_cell.value = _sanitize_excel_value(value)
         label_cell.font = FONT_HEADER
         value_cell.font = FONT_NORMAL
         label_cell.alignment = ALIGN_LEFT
@@ -2399,7 +2410,7 @@ def build_final_workbook(
         for requested_name, frame in planned_sheets:
             safe_name = _unique_sheet_name(requested_name, used_names)
             normalized_sheet_names[requested_name] = safe_name
-            display_frame = _exclude_final_columns(frame)
+            display_frame = _sanitize_excel_frame(_exclude_final_columns(frame))
             if requested_name == PDF_STATUS_SHEET_NAME:
                 display_frame.to_excel(
                     writer,
@@ -2410,7 +2421,9 @@ def build_final_workbook(
             elif requested_name == "month_dr_cr":
                 display_frame.to_excel(writer, sheet_name=safe_name, index=False)
             else:
-                _exclude_final_columns(_ensure_columns(frame)).to_excel(writer, sheet_name=safe_name, index=False)
+                _sanitize_excel_frame(
+                    _exclude_final_columns(_ensure_columns(frame))
+                ).to_excel(writer, sheet_name=safe_name, index=False)
 
     workbook = load_workbook(final_path)
     _apply_base_style(workbook)
