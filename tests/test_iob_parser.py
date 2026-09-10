@@ -15,6 +15,7 @@ from parsers.parser_registry import list_supported_banks
 SAMPLE_PDF = PROJECT_ROOT / "input" / "AKILANMANIVANNAN.pdf"
 NEW_LAYOUT_SAMPLE_PDF = PROJECT_ROOT / "input" / "IOI.pdf"
 COD_LAYOUT_SAMPLE_PDF = PROJECT_ROOT / "input" / "iob.pdf"
+TEXT_LAYOUT_SAMPLE_PDF = PROJECT_ROOT / "input" / "BARATHI FOOD PRODUCT_IOB.pdf"
 
 
 @unittest.skipUnless(SAMPLE_PDF.is_file(), "IOB sample PDF is required for this regression test.")
@@ -98,6 +99,60 @@ class IOBCodLayoutParserRegressionTests(unittest.TestCase):
         self.assertEqual(cheque_row["Txn_Ref"], "000042")
         self.assertEqual(cheque_row["Debit"], 50000.0)
         self.assertEqual(cheque_row["Balance"], 49181.81)
+
+
+@unittest.skipUnless(
+    TEXT_LAYOUT_SAMPLE_PDF.is_file(),
+    "BARATHI FOOD PRODUCT IOB sample PDF is required for this regression test.",
+)
+class IOBTextLayoutParserRegressionTests(unittest.TestCase):
+    def test_bharathi_food_product_text_layout_is_parsed(self) -> None:
+        parser = IOBParser()
+
+        parsed = parser.parse(pdf_path=TEXT_LAYOUT_SAMPLE_PDF, rules_df=pd.DataFrame())
+
+        self.assertEqual(len(parsed), 639)
+
+        first = parsed.iloc[0]
+        self.assertEqual(first["Date"], "09/09/2026")
+        self.assertEqual(first["ValueDate"], "09/09/2026")
+        self.assertEqual(
+            first["Narration"],
+            "UPI/661809626565/DR/Euronet Servic/UTI/UPI",
+        )
+        self.assertEqual(first["Debit"], 350.9)
+        self.assertTrue(pd.isna(first["Credit"]))
+        self.assertEqual(first["Balance"], 21214.77)
+        self.assertEqual(first["Account_Number"], "280702000000205")
+        self.assertEqual(first["Page"], 1)
+
+        credit_row = parsed.iloc[3]
+        self.assertTrue(pd.isna(credit_row["Debit"]))
+        self.assertEqual(credit_row["Credit"], 100000.0)
+        self.assertEqual(credit_row["Balance"], 221916.57)
+
+        last = parsed.iloc[-1]
+        self.assertEqual(last["Date"], "10/03/2026")
+        self.assertEqual(
+            last["Narration"],
+            "UPI/606911872091/DR/BHARATHIRAJA ./TMB/UPI",
+        )
+        self.assertEqual(last["Debit"], 600.0)
+        self.assertEqual(last["Balance"], 28.46)
+        self.assertEqual(last["Page"], 10)
+
+        for row_index in range(len(parsed) - 1):
+            current = parsed.iloc[row_index]
+            older = parsed.iloc[row_index + 1]
+            debit = 0.0 if pd.isna(current["Debit"]) else current["Debit"]
+            credit = 0.0 if pd.isna(current["Credit"]) else current["Credit"]
+            expected_balance = older["Balance"] - debit + credit
+            self.assertAlmostEqual(
+                current["Balance"],
+                expected_balance,
+                places=2,
+                msg=f"Balance continuity failed at parsed row {row_index + 1}.",
+            )
 
 
 if __name__ == "__main__":

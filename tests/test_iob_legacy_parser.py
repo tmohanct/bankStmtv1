@@ -9,11 +9,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CODE_ROOT = str(PROJECT_ROOT / "src" / "code")
 sys.path.insert(0, CODE_ROOT)
 
+import bank_detector
 import iob_parser
 
 SAMPLE_PDF = PROJECT_ROOT / "input" / "AKILANMANIVANNAN.pdf"
 NEW_LAYOUT_SAMPLE_PDF = PROJECT_ROOT / "input" / "IOI.pdf"
 COD_LAYOUT_SAMPLE_PDF = PROJECT_ROOT / "input" / "iob.pdf"
+TEXT_LAYOUT_SAMPLE_PDF = PROJECT_ROOT / "input" / "BARATHI FOOD PRODUCT_IOB.pdf"
 
 
 @unittest.skipUnless(SAMPLE_PDF.is_file(), "IOB sample PDF is required for this regression test.")
@@ -82,6 +84,52 @@ class IOBLegacyParserTests(unittest.TestCase):
         self.assertEqual(cheque_row["Cheque No"], "000042")
         self.assertEqual(cheque_row["Debit"], 50000.0)
         self.assertEqual(cheque_row["Balance"], 49181.81)
+
+    @unittest.skipUnless(
+        TEXT_LAYOUT_SAMPLE_PDF.is_file(),
+        "BARATHI FOOD PRODUCT IOB sample PDF is required for this regression test.",
+    )
+    def test_bharathi_food_product_text_layout_is_parsed(self) -> None:
+        logger = logging.getLogger("tests.iob_legacy_parser.text_layout")
+        logger.handlers.clear()
+        logger.addHandler(logging.NullHandler())
+
+        records = iob_parser.parse(str(TEXT_LAYOUT_SAMPLE_PDF), logger)
+
+        self.assertEqual(len(records), 639)
+        self.assertEqual(records[0]["Date"], "09/09/2026")
+        self.assertEqual(
+            records[0]["Details"],
+            "UPI/661809626565/DR/Euronet Servic/UTI/UPI",
+        )
+        self.assertEqual(records[0]["Debit"], 350.9)
+        self.assertIsNone(records[0]["Credit"])
+        self.assertEqual(records[0]["Balance"], 21214.77)
+
+        self.assertIsNone(records[3]["Debit"])
+        self.assertEqual(records[3]["Credit"], 100000.0)
+        self.assertEqual(records[3]["Balance"], 221916.57)
+
+        self.assertEqual(records[-1]["Date"], "10/03/2026")
+        self.assertEqual(
+            records[-1]["Details"],
+            "UPI/606911872091/DR/BHARATHIRAJA ./TMB/UPI",
+        )
+        self.assertEqual(records[-1]["Debit"], 600.0)
+        self.assertEqual(records[-1]["Balance"], 28.46)
+
+    @unittest.skipUnless(
+        TEXT_LAYOUT_SAMPLE_PDF.is_file(),
+        "BARATHI FOOD PRODUCT IOB sample PDF is required for this regression test.",
+    )
+    def test_bharathi_food_product_is_auto_detected_as_iob(self) -> None:
+        logger = logging.getLogger("tests.iob_legacy_parser.auto_detect")
+        logger.handlers.clear()
+        logger.addHandler(logging.NullHandler())
+
+        detected = bank_detector.detect_bank_from_pdf(TEXT_LAYOUT_SAMPLE_PDF, logger)
+
+        self.assertEqual(detected, "iob")
 
 
 if __name__ == "__main__":

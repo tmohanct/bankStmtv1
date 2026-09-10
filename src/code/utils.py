@@ -427,15 +427,22 @@ def parse_with_config(
     return records
 
 
-def records_to_dataframe(records: list[dict[str, Any]]) -> pd.DataFrame:
+def records_to_dataframe(
+    records: list[dict[str, Any]],
+    *,
+    include_source: bool = True,
+) -> pd.DataFrame:
+    output_columns = [
+        column for column in OUTPUT_COLUMNS if include_source or column != "Source"
+    ]
     if not records:
-        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+        return pd.DataFrame(columns=output_columns)
 
     frame = pd.DataFrame(records)
-    for col in OUTPUT_COLUMNS:
+    for col in output_columns:
         if col not in frame.columns:
             frame[col] = None
-    frame = frame[OUTPUT_COLUMNS]
+    frame = frame[output_columns]
     return sanitize_cheque_column(frame)
 
 

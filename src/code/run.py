@@ -53,7 +53,7 @@ from utils import (
     write_output_excel,
 )
 
-EXAMPLE_CMD = 'python run.py --pdf "file1;file2" --bank icici --pwd mypassword --out outputname'
+EXAMPLE_CMD = "python run.py --pdf My Statement.pdf --bank icici"
 INVALID_FILENAME_CHARS_RE = re.compile(r'[<>:"/\\\\|?*]+')
 
 PARSERS = {
@@ -99,7 +99,12 @@ def parse_args(argv=None):
         "--file",
         dest="pdf",
         required=True,
-        help='Semicolon-separated PDF names from input/ without .pdf extension. In PowerShell, wrap the value in quotes. Use $ in the PDF filename to embed a password.',
+        nargs="+",
+        help=(
+            "PDF name from input/ (the .pdf extension is optional). Names containing spaces "
+            "may be entered without quotes. Separate multiple PDFs with ',' or ';'. "
+            "Use $ in a PDF filename to embed a password."
+        ),
     )
     parser.add_argument(
         "--bank",
@@ -172,8 +177,16 @@ class RuntimeStatusTicker:
             )
 
 
-def split_pdf_args(pdf_arg: str) -> list[str]:
-    files = [part.strip() for part in pdf_arg.split(";") if part.strip()]
+def split_pdf_args(pdf_arg: str | list[str]) -> list[str]:
+    """Return PDF names, treating only commas and semicolons as separators.
+
+    ``argparse`` supplies a list because ``--pdf`` accepts one or more command
+    tokens. Rejoining those tokens lets a filename such as ``My Statement.pdf``
+    be passed without quotes, while preserving comma and semicolon as the
+    explicit multi-file delimiters.
+    """
+    raw_value = pdf_arg if isinstance(pdf_arg, str) else " ".join(pdf_arg)
+    files = [part.strip() for part in re.split(r"[;,]", raw_value) if part.strip()]
     if not files:
         raise ValueError("No input file was provided in --pdf.")
     return files
@@ -394,8 +407,9 @@ def main(argv=None) -> int:
                 )
                 reconcile(records, str(readable_pdf_path), logger)
 
-                for row in records:
-                    row["Source"] = pdf_path.name
+                if len(pdf_paths) > 1:
+                    for row in records:
+                        row["Source"] = pdf_path.name
 
                 merged_records.extend(records)
         finally:
@@ -407,7 +421,10 @@ def main(argv=None) -> int:
 
         logger.info("Total merged rows parsed: %s", len(merged_records))
 
-        statement_df = records_to_dataframe(merged_records)
+        statement_df = records_to_dataframe(
+            merged_records,
+            include_source=len(pdf_paths) > 1,
+        )
         rows_before_deduplication = len(statement_df)
         statement_df = remove_exact_duplicate_transactions(statement_df).reset_index(drop=True)
         statement_df["Sno"] = range(1, len(statement_df) + 1)
@@ -437,6 +454,7 @@ def main(argv=None) -> int:
             logger=logger,
             source_pdf_paths=pdf_paths,
             source_pdf_passwords=source_pdf_passwords,
+            include_source=len(pdf_paths) > 1,
         )
 
         print(f"Intermediate output written: {intermediate_output}")

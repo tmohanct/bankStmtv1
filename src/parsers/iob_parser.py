@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import pdfplumber
@@ -12,8 +13,18 @@ import pdfplumber
 from parsers.base_parser import BaseStatementParser
 from src.utils.amount_utils import parse_amount
 
-ACCOUNT_NUMBER_RE = re.compile(r"Account\s+(?:No|Number)\s*[:\-]\s*([0-9A-Za-z]+)", re.IGNORECASE)
+ACCOUNT_NUMBER_RE = re.compile(
+    r"(?:Account\s+(?:No|Number)|A\s*/\s*C\s*(?:No|Number))\s*[:\-]\s*([0-9A-Za-z]+)",
+    re.IGNORECASE,
+)
 IOB_CODE_VALUES = {"TRF", "CSH", "CLR"}
+TEXT_LAYOUT_TRANSACTION_RE = re.compile(
+    r"^(?P<date>\d{2}-\d{2}-\d{4})\s+"
+    r"(?P<narration>.+?)\s+"
+    r"(?P<amount>\d[\d,]*\.\d{2})(?P<direction>DR|CR)\s+"
+    r"(?P<balance>-?\d[\d,]*\.\d{2})(?P<balance_direction>DR|CR)?$",
+    re.IGNORECASE,
+)
 OUTPUT_COLUMNS = [
     "Date",
     "ValueDate",
@@ -39,7 +50,7 @@ def _parse_date_token(raw_value: str) -> str | None:
     if not text:
         return None
 
-    for fmt in ("%d-%b-%y", "%d-%b-%Y", "%d/%m/%y", "%d/%m/%Y"):
+    for fmt in ("%d-%b-%y", "%d-%b-%Y", "%d/%m/%y", "%d/%m/%Y", "%d-%m-%y", "%d-%m-%Y"):
         try:
             return datetime.strptime(text, fmt).strftime("%d/%m/%Y")
         except ValueError:
@@ -119,6 +130,86 @@ def _build_record(row: list[object], page_number: int, account_number: str | Non
     }
 
 
+def _build_text_layout_record(
+    line: str,
+    page_number: int,
+    account_number: str | None,
+) -> dict[str, object] | None:
+    """Parse IOB's text-only mobile-banking statement layout.
+
+    This layout visually has columns, but the PDF exposes every transaction as
+    one text line and exposes no table geometry to pdfplumber. The amount
+    suffix (Dr/Cr) is therefore the authoritative debit/credit indicator.
+    """
+    match = TEXT_LAYOUT_TRANSACTION_RE.fullmatch(_clean_cell(line))
+    if match is None:
+        return None
+
+    txn_date = _parse_date_token(match.group("date"))
+    amount = parse_amount(match.group("amount"))
+    balance = parse_amount(match.group("balance"))
+    if txn_date is None or amount is None or balance is None:
+        return None
+
+    direction = match.group("direction").upper()
+    balance_direction = (match.group("balance_direction") or "").upper()
+    if balance_direction == "DR" and balance > 0:
+        balance = -balance
+
+    return {
+        "Date": txn_date,
+        "ValueDate": txn_date,
+        "Narration": _clean_cell(match.group("narration")),
+        "Debit": amount if direction == "DR" else None,
+        "Credit": amount if direction == "CR" else None,
+        "Balance": balance,
+        "Currency": "INR",
+        "Account_Number": account_number,
+        "Txn_Ref": "",
+        "Page": page_number,
+    }
+
+
+def parse_iob_records(
+    pdf_path: str | Path,
+    progress_cb: Callable[[int], None] | None = None,
+) -> list[dict[str, object]]:
+    """Return normalized IOB records from table-based or text-only statements."""
+    rows: list[dict[str, object]] = []
+
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        account_number = _extract_account_number(pdf)
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            page_start_count = len(rows)
+            tables = page.extract_tables() or []
+            for table in tables:
+                for raw_row in table:
+                    record = _build_record(raw_row, page_number, account_number)
+                    if record is None:
+                        continue
+                    rows.append(record)
+                    if progress_cb is not None:
+                        progress_cb(len(rows))
+
+            # Some IOB mobile-banking statements contain selectable text but
+            # no extractable tables. Fall back only when the table parser found
+            # no transactions on this page, preventing duplicate rows.
+            if len(rows) != page_start_count:
+                continue
+
+            page_text = page.extract_text() or ""
+            for line in page_text.splitlines():
+                record = _build_text_layout_record(line, page_number, account_number)
+                if record is None:
+                    continue
+                rows.append(record)
+                if progress_cb is not None:
+                    progress_cb(len(rows))
+
+    return rows
+
+
 class IOBParser(BaseStatementParser):
     """Indian Overseas Bank statement parser."""
 
@@ -127,18 +218,5 @@ class IOBParser(BaseStatementParser):
     def parse(self, pdf_path: Path, rules_df: pd.DataFrame) -> pd.DataFrame:
         """Parse IOB statement PDF and return raw transaction rows."""
         _ = rules_df
-
-        rows: list[dict[str, object]] = []
-
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            account_number = _extract_account_number(pdf)
-
-            for page_number, page in enumerate(pdf.pages, start=1):
-                tables = page.extract_tables() or []
-                for table in tables:
-                    for raw_row in table:
-                        record = _build_record(raw_row, page_number, account_number)
-                        if record is not None:
-                            rows.append(record)
-
+        rows = parse_iob_records(pdf_path)
         return pd.DataFrame(rows, columns=OUTPUT_COLUMNS)

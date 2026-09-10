@@ -5,6 +5,7 @@ import sys
 import tempfile
 import textwrap
 import zipfile
+from copy import copy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from io import BytesIO
 from datetime import date, datetime, timedelta
@@ -17,6 +18,7 @@ import fitz
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from PIL import Image as PILImage, ImageDraw, ImageFont
 
 from utils import OUTPUT_COLUMNS, clean_detail, compact_detail_key, sanitize_cheque_column
@@ -219,6 +221,13 @@ def _ensure_columns(frame: pd.DataFrame) -> pd.DataFrame:
 def _exclude_final_columns(frame: pd.DataFrame) -> pd.DataFrame:
     """Keep internal matching columns out of every final workbook sheet."""
     return frame.drop(columns=list(FINAL_EXCLUDED_COLUMNS), errors="ignore")
+
+
+def _exclude_source_column(frame: pd.DataFrame, include_source: bool) -> pd.DataFrame:
+    """Hide source bookkeeping from all final sheets for a single-PDF run."""
+    if include_source:
+        return frame
+    return frame.drop(columns=["Source"], errors="ignore")
 
 
 def _first_present_column(lower_map: dict[str, Any], *keys: str) -> Any | None:
@@ -1540,6 +1549,47 @@ def _apply_base_style(workbook) -> None:
             ws.column_dimensions[col_letter].width = AMOUNT_COLUMN_WIDTH
 
 
+def _apply_final_layout(workbook) -> None:
+    """Apply the workbook-wide display settings requested for final output."""
+    date_headers = {"date", "txndate", "valuedate"}
+
+    for ws in workbook.worksheets:
+        date_columns = {
+            col_idx
+            for col_idx in range(1, ws.max_column + 1)
+            if _normalize_header(ws.cell(row=1, column=col_idx).value) in date_headers
+        }
+
+        for row_idx in range(1, ws.max_row + 1):
+            ws.row_dimensions[row_idx].height = 19
+            for col_idx in range(1, ws.max_column + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                alignment = copy(cell.alignment)
+                alignment.wrap_text = False
+                cell.alignment = alignment
+
+        if ws.title.lower() == "month_dr_cr":
+            continue
+
+        for col_idx in range(1, ws.max_column + 1):
+            column_letter = get_column_letter(col_idx)
+            if col_idx in date_columns:
+                ws.column_dimensions[column_letter].width = 13
+                continue
+
+            max_length = 0
+            for row_idx in range(1, ws.max_row + 1):
+                value = ws.cell(row=row_idx, column=col_idx).value
+                if value is None:
+                    continue
+                max_length = max(
+                    max_length,
+                    max((len(line) for line in str(value).splitlines()), default=0),
+                )
+            # Excel supports widths only up to 255 characters.
+            ws.column_dimensions[column_letter].width = min(max(max_length + 2, 10), 255)
+
+
 def _apply_month_dr_cr_style(workbook, sheet_name: str) -> None:
     if sheet_name not in workbook.sheetnames:
         return
@@ -1580,10 +1630,10 @@ def _apply_month_dr_cr_style(workbook, sheet_name: str) -> None:
                     cell.number_format = INDIAN_NUMBER_FORMAT_NO_DECIMAL
                 cell.fill = MONTH_VALUE_ROW_FILLS[(row_idx - 2) % len(MONTH_VALUE_ROW_FILLS)]
 
-    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["A"].width = 12
     width_map = {
-        "Dr": 14,
-        "Cr": 14,
+        "Dr": 16,
+        "Cr": 16,
         "Net": 14,
         "EOM Balance": 16,
         "#.Of.Dr": 10,
@@ -2367,6 +2417,7 @@ def build_final_workbook(
     logger,
     source_pdf_paths: list[Path] | None = None,
     source_pdf_passwords: list[str | None] | None = None,
+    include_source: bool = True,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     statement_df = _ensure_columns(statement_df)
@@ -2410,7 +2461,10 @@ def build_final_workbook(
         for requested_name, frame in planned_sheets:
             safe_name = _unique_sheet_name(requested_name, used_names)
             normalized_sheet_names[requested_name] = safe_name
-            display_frame = _sanitize_excel_frame(_exclude_final_columns(frame))
+            display_frame = _exclude_source_column(
+                _sanitize_excel_frame(_exclude_final_columns(frame)),
+                include_source,
+            )
             if requested_name == PDF_STATUS_SHEET_NAME:
                 display_frame.to_excel(
                     writer,
@@ -2421,8 +2475,11 @@ def build_final_workbook(
             elif requested_name == "month_dr_cr":
                 display_frame.to_excel(writer, sheet_name=safe_name, index=False)
             else:
-                _sanitize_excel_frame(
-                    _exclude_final_columns(_ensure_columns(frame))
+                _exclude_source_column(
+                    _sanitize_excel_frame(
+                        _exclude_final_columns(_ensure_columns(frame))
+                    ),
+                    include_source,
                 ).to_excel(writer, sheet_name=safe_name, index=False)
 
     workbook = load_workbook(final_path)
@@ -2446,6 +2503,7 @@ def build_final_workbook(
         normalized_sheet_names.get(PDF_STATUS_SHEET_NAME, PDF_STATUS_SHEET_NAME),
         pdf_account_summary_rows,
     )
+    _apply_final_layout(workbook)
     _force_leading_equals_to_text(workbook)
     workbook.save(final_path)
 

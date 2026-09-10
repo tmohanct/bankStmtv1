@@ -53,7 +53,11 @@ BANK_SIGNATURES: dict[str, tuple[tuple[str, int], ...]] = {
     "idfc": (("IDFC FIRST BANK", 4), ("IDFB0", 3)),
     "indian": (("IDIB0", 5), ("ACCOUNT STATEMENT", 2), ("ACCOUNT ACTIVITY", 2)),
     "indus": (("INDUSIND BANK", 4), ("INDB0", 3)),
-    "iob": (("INDIAN OVERSEAS BANK", 4), ("IOBA0", 3)),
+    "iob": (
+        ("INDIAN OVERSEAS BANK", 4),
+        ("IOBA0", 3),
+        ("IOB FREEDOM CURRENT ACCOUNT", 10),
+    ),
     "kvb": (("KARUR VYSYA BANK", 4), ("KVBL0", 3)),
     "kotak": (("KOTAK MAHINDRA BANK", 4), ("KKBK", 3), ("CURRENT ACCOUNT TRANSACTIONS", 1)),
     "pnb": (("PUNJAB NATIONAL BANK", 4), ("PUNB0", 3)),

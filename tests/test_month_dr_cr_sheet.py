@@ -147,6 +147,9 @@ class MonthDrCrSheetTests(unittest.TestCase):
         self.assertEqual(len(ws._images), 1)
         self.assertEqual(ws._images[0].anchor, "A11")
         self.assertEqual(ws.auto_filter.ref, "A1:I4")
+        self.assertEqual(ws.column_dimensions["A"].width, 12)
+        self.assertEqual(ws.column_dimensions["B"].width, 16)
+        self.assertEqual(ws.column_dimensions["C"].width, 16)
 
 
 if __name__ == "__main__":
