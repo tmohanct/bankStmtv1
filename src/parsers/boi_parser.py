@@ -294,3 +294,7 @@ class BOIParser(BaseStatementParser):
                 "Source_Page",
             ],
         )
+
+
+# PDF_Status only. Transaction parsing does not use this profile.
+PDF_STATUS_PROFILE = {'name': 'Bank of India', 'ifsc': 'BKID', 'aliases': ['Bank of India']}

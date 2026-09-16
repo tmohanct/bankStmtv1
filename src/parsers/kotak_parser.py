@@ -148,3 +148,7 @@ class KotakParser(BaseStatementParser):
                 "Source_Page",
             ],
         )
+
+
+# PDF_Status only. Transaction parsing does not use this profile.
+PDF_STATUS_PROFILE = {'name': 'Kotak Mahindra Bank', 'ifsc': 'KKBK', 'aliases': ['Kotak Mahindra Bank', 'Kotak'], 'name_after': 'Account Statement'}

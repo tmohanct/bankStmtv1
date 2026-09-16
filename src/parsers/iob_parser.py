@@ -220,3 +220,7 @@ class IOBParser(BaseStatementParser):
         _ = rules_df
         rows = parse_iob_records(pdf_path)
         return pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
+
+
+# PDF_Status only. Transaction parsing does not use this profile.
+PDF_STATUS_PROFILE = {'name': 'Indian Overseas Bank', 'ifsc': 'IOBA', 'aliases': ['Indian Overseas Bank'], 'header_pattern': '\\bTYPE\\s*:\\s*IOB\\b', 'account_name_tail': True, 'name_after': 'A/C NO'}

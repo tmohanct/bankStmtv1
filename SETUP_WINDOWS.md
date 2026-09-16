@@ -4,7 +4,7 @@
 - Windows 10 or Windows 11
 - Internet connection for `pip install`
 - `winget` if you want the setup script to auto-install Python or Tesseract
-- Tesseract OCR only if you need `icici` statement support
+- Tesseract OCR for `icici` and image-only (scanned) `hdfc` statements
 
 ## Fastest setup on a new machine
 1. Copy or clone this repo to the new machine.
@@ -78,7 +78,7 @@ If `py` is not available yet, install Python 3.11 first:
 winget install --id Python.Python.3.11 -e --accept-package-agreements --accept-source-agreements
 ```
 
-If you need ICICI support and Tesseract is not installed, install it manually or use `winget`:
+If you need ICICI or scanned HDFC support and Tesseract is not installed, install it manually or use `winget`:
 
 ```powershell
 winget install --id UB-Mannheim.TesseractOCR -e --accept-package-agreements --accept-source-agreements
@@ -91,6 +91,10 @@ winget install --id UB-Mannheim.TesseractOCR -e --accept-package-agreements --ac
 - Final workbooks are written to `output\`
 
 ## Run examples
+
+Image-only HDFC statements are OCRed automatically. The parser stops if its
+transaction counts, totals, or running balances do not reconcile.
+
 Single file:
 
 ```powershell

@@ -179,3 +179,7 @@ class ESFBParser(BaseStatementParser):
                 "Source_Page",
             ],
         )
+
+
+# PDF_Status only. Transaction parsing does not use this profile.
+PDF_STATUS_PROFILE = {'name': 'Equitas Small Finance Bank', 'ifsc': 'ESFB', 'aliases': ['Equitas Small Finance Bank', 'Equitas']}

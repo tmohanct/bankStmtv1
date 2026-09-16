@@ -298,3 +298,7 @@ def parse_savings_transaction_layout(
 
     logger.info("ICICI savings text parse complete: rows=%s", len(records))
     return records
+
+
+# PDF_Status only. Transaction parsing does not use this profile.
+PDF_STATUS_PROFILE = {'name': 'ICICI Bank', 'ifsc': 'ICIC', 'aliases': ['ICICI Bank']}

@@ -4,7 +4,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+import fitz
 import pdfplumber
+
+from parsers.hdfc_parser import parse_scanned_hdfc
 
 from utils import clean_cell, clean_detail, normalize_date, parse_amount
 
@@ -123,6 +126,12 @@ def _finalize_record(
 def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
     logger.info("Parsing HDFC statement: %s", pdf_path)
 
+    # Image-only pages need OCR before the text parser touches the scan.
+    with fitz.open(pdf_path) as document:
+        if document.page_count and all(not page.get_text().strip() for page in document):
+            logger.info("HDFC PDF has no text layer; using OCR")
+            return parse_scanned_hdfc(pdf_path, logger, progress_cb)
+
     pending: PendingRecord | None = None
     raw_records: list[PendingRecord] = []
     opening_balance: float | None = None
@@ -225,6 +234,9 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
             logger.info("HDFC parsed row count matches summary: %s", len(records))
 
     logger.info("HDFC parse complete: rows=%s opening_balance=%s", len(records), opening_balance)
+    if not records:
+        logger.info("HDFC text parser found no rows; trying OCR")
+        return parse_scanned_hdfc(pdf_path, logger, progress_cb)
     return records
 
 

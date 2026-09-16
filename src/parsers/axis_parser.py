@@ -32,3 +32,9 @@ class AxisParser(BaseStatementParser):
             rows,
             columns=["Date", "Value_Date", "Description", "Debit", "Credit", "Balance", "Reference", "Source_Page"],
         )
+
+
+# PDF_Status only. Transaction parsing does not use this profile.
+PDF_STATUS_PROFILE = {'name': 'Axis Bank', 'ifsc': 'UTIB', 'aliases': ['Axis Bank'], 'name_after': 'Account Statement Report', 'address_label': 'Joint Holder'}
+
+PDF_STATUS_PROFILE.update({'unlabelled_left': True})

@@ -101,3 +101,7 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
 
     logger.info("Bank of Maharashtra parse complete: rows=%s", len(records))
     return records
+
+
+# PDF_Status only. Transaction parsing does not use this profile.
+PDF_STATUS_PROFILE = {'name': 'Bank of Maharashtra', 'ifsc': 'MAHB', 'aliases': ['Bank of Maharashtra', 'Maharashtra Bank']}

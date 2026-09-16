@@ -241,3 +241,7 @@ class UnionBankParser(BaseStatementParser):
                 "Source_Page",
             ],
         )
+
+
+# PDF_Status only. Transaction parsing does not use this profile.
+PDF_STATUS_PROFILE = {'name': 'Union Bank of India', 'ifsc': 'UBIN', 'aliases': ['Union Bank of India', 'Union Bank'], 'name_after': 'Statement of Account'}

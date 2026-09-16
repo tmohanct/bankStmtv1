@@ -511,3 +511,7 @@ class SouthIndianParser(BaseStatementParser):
                 "Source_Page",
             ],
         )
+
+
+# PDF_Status only. Transaction parsing does not use this profile.
+PDF_STATUS_PROFILE = {'name': 'South Indian Bank', 'ifsc': 'SIBL', 'aliases': ['South Indian Bank'], 'unlabelled_left': True}

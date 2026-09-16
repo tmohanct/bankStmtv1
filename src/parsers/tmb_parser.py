@@ -350,3 +350,7 @@ class TMBParser(BaseStatementParser):
                 "Source_Page",
             ],
         )
+
+
+# PDF_Status only. Transaction parsing does not use this profile.
+PDF_STATUS_PROFILE = {'name': 'Tamilnad Mercantile Bank', 'ifsc': 'TMBL', 'aliases': ['Tamilnad Mercantile Bank']}

@@ -8,13 +8,12 @@ import zipfile
 from copy import copy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from io import BytesIO
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
 import pandas as pd
-import fitz
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -60,21 +59,14 @@ PDF_STATUS_FILLS = {
     "FAIL": PatternFill(fill_type="solid", fgColor="F4CCCC"),
 }
 PDF_STATUS_RANK = {"PASS": 0, "WARNING": 1, "FAIL": 2}
-XMP_FIELD_LABELS = {
-    "CreateDate": "xmp:CreateDate",
-    "ModifyDate": "xmp:ModifyDate",
-    "MetadataDate": "xmp:MetadataDate",
-    "CreatorTool": "xmp:CreatorTool",
-    "DocumentID": "xmpMM:DocumentID",
-    "InstanceID": "xmpMM:InstanceID",
-    "History": "xmpMM:History",
-}
 INDIAN_NUMBER_FORMAT = "#,##,##0.00"
 INDIAN_NUMBER_FORMAT_NO_DECIMAL = "#,##,##0"
 DATE_NUMBER_FORMAT = "yyyy-mm-dd"
 DATE_INPUT_FORMATS = ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y")
 EXCEL_ILLEGAL_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 AMOUNT_COLUMN_WIDTH = 16
+AMOUNT_COLUMN_PADDING = 4
+PDF_STATUS_MAX_COLUMN_WIDTH = 108
 THIN_BORDER = Border(
     left=Side(style="thin", color="BFBFBF"),
     right=Side(style="thin", color="BFBFBF"),
@@ -202,6 +194,17 @@ def _round_money_for_excel(value: Any) -> int | None:
         return None
 
     return int(rounded)
+
+
+def _displayed_amount_length(value: Any) -> int:
+    """Length of an integer with Indian digit grouping and an optional minus sign."""
+    if isinstance(value, float) and pd.isna(value):
+        return 0
+    if not isinstance(value, (int, float)):
+        return len(str(value or ""))
+    digits = str(abs(int(value)))
+    separators = 0 if len(digits) <= 3 else 1 + (len(digits) - 4) // 2
+    return len(digits) + separators + (value < 0)
 
 
 def _ensure_columns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -610,849 +613,43 @@ def _build_month_dr_cr_sheet(statement_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
-def _parse_pdf_metadata_datetime(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-
-    if text.startswith("D:"):
-        text = text[2:]
-
-    match = re.match(
-        r"^(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?",
-        text,
-    )
-    if match is None:
-        return None
-
-    year = int(match.group(1))
-    month = int(match.group(2) or "1")
-    day = int(match.group(3) or "1")
-    hour = int(match.group(4) or "0")
-    minute = int(match.group(5) or "0")
-    second = int(match.group(6) or "0")
-
-    try:
-        return datetime(year, month, day, hour, minute, second)
-    except ValueError:
-        return None
-
-
-def _format_pdf_datetime(value: datetime | None) -> str:
-    if value is None:
-        return ""
-    return value.strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _format_statement_date(value: Any) -> str:
-    if value in (None, ""):
-        return ""
-    parsed = pd.to_datetime(str(value).strip(), dayfirst=True, errors="coerce")
-    if pd.isna(parsed):
-        return str(value).strip()
-    return parsed.strftime("%Y-%B-%d")
-
-
-def _clean_pdf_summary_value(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip(" :")
-
-
-def _authenticate_pdf_if_needed(pdf, password: str | None) -> tuple[bool, str]:
-    if not bool(getattr(pdf, "needs_pass", False)):
-        return True, ""
-    if not password:
-        return False, "PDF is encrypted and no password was provided."
-    try:
-        if pdf.authenticate(password):
-            return True, ""
-    except Exception as exc:  # noqa: BLE001
-        return False, str(exc)
-    return False, "PDF password authentication failed."
-
-
-def _extract_first_page_lines(pdf_path: Path, password: str | None = None) -> list[str]:
-    try:
-        with fitz.open(str(pdf_path)) as pdf:
-            authenticated, _ = _authenticate_pdf_if_needed(pdf, password)
-            if not authenticated:
-                return []
-            if pdf.page_count <= 0:
-                return []
-            text = pdf[0].get_text("text") or ""
-    except Exception:  # noqa: BLE001
-        return []
-    return [_clean_pdf_summary_value(line) for line in text.splitlines() if _clean_pdf_summary_value(line)]
-
-
-def _extract_known_bank_name(lines: list[str], pdf_path: Path | None = None) -> str:
-    bank_names = (
-        "Central Bank of India",
-        "Indian Bank",
-        "Axis Bank",
-        "Bank of Baroda",
-        "Bank of India",
-        "Bank of Maharashtra",
-        "Canara Bank",
-        "City Union Bank",
-        "DBS Bank",
-        "Federal Bank",
-        "HDFC Bank",
-        "ICICI Bank",
-        "IDBI Bank",
-        "IDFC FIRST Bank",
-        "Indian Overseas Bank",
-        "IndusInd Bank",
-        "Karur Vysya Bank",
-        "Kotak Mahindra Bank",
-        "Punjab National Bank",
-        "State Bank of India",
-        "South Indian Bank",
-        "Tamilnad Mercantile Bank",
-        "Union Bank",
-    )
-    haystack = "\n".join(lines[:160])
-    for bank_name in bank_names:
-        if re.search(re.escape(bank_name), haystack, re.IGNORECASE):
-            return bank_name
-    if re.search(r"\bIDIB0", haystack, re.IGNORECASE):
-        return "Indian Bank"
-    if re.search(r"\bKVBL\b", haystack, re.IGNORECASE):
-        return "Karur Vysya Bank"
-
-    filename = pdf_path.stem if pdf_path is not None else ""
-    if re.search(r"\bindian\b|ivlindian", filename, re.IGNORECASE):
-        return "Indian Bank"
-
-    first_line = lines[0] if lines else ""
-    if re.fullmatch(r"(?:ACCOUNT|BANK)?\s*STATEMENT(?:\s+REPORT)?", first_line, re.IGNORECASE):
-        return ""
-    return first_line
-
-
-def _extract_account_number(lines: list[str]) -> str:
-    text = "\n".join(lines[:160])
-    patterns = (
-        r"\bAccount\s*(?:Number|No\.?|#)\s*[:\-]?\s*([A-Za-z0-9Xx* -]{4,30})",
-        r"\bA/C\s*(?:Number|No\.?|#)?\s*[:\-]?\s*([A-Za-z0-9Xx* -]{4,30})",
-        r"\bAcct\s*(?:Number|No\.?|#)?\s*[:\-]?\s*([A-Za-z0-9Xx* -]{4,30})",
-        r"\bAcc\.?\s*(?:Number|No\.?|#)\s*[:\-]?\s*([A-Za-z0-9Xx* -]{4,30})",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match is not None:
-            return _clean_pdf_summary_value(match.group(1))
-    return ""
-
-
-def _line_index_startswith(lines: list[str], *prefixes: str) -> int | None:
-    lowered_prefixes = tuple(prefix.lower() for prefix in prefixes)
-    for idx, line in enumerate(lines):
-        if line.lower().startswith(lowered_prefixes):
-            return idx
-    return None
-
-
-def _extract_labeled_block(lines: list[str], label: str, stop_prefixes: tuple[str, ...]) -> str:
-    start_idx = _line_index_startswith(lines, label)
-    if start_idx is None:
-        return ""
-
-    label_line = lines[start_idx]
-    _, separator, inline_value = label_line.partition(":")
-    values: list[str] = []
-    if separator and inline_value.strip():
-        values.append(inline_value.strip())
-
-    for line in lines[start_idx + 1 :]:
-        lowered = line.lower()
-        if any(lowered.startswith(prefix.lower()) for prefix in stop_prefixes):
-            break
-        values.append(line)
-    return _clean_pdf_summary_value(" ".join(values))
-
-
-def _extract_customer_and_address(lines: list[str]) -> tuple[str, str]:
-    customer = _extract_labeled_block(
-        lines,
-        "Account Holder Name",
-        ("Account Type", "Account Number", "Customer", "Branch", "IFSC"),
-    )
-    if not customer:
-        customer = _extract_labeled_block(
-            lines,
-            "Customer Name",
-            ("Address", "Account", "Branch", "IFSC", "Statement"),
-        )
-    if not customer:
-        for line in lines[:60]:
-            match = re.match(r"^(?:Name|Account Name)\s*:\s*(.+)$", line, re.IGNORECASE)
-            if match is not None:
-                customer = _clean_pdf_summary_value(match.group(1))
-                break
-
-    address = _extract_labeled_block(
-        lines,
-        "Customer's Address",
-        ("Branch", "IFSC", "Account Currency", "Account Summary", "Statement"),
-    )
-    if not address:
-        address = _extract_labeled_block(
-            lines,
-            "Address",
-            ("Account", "Customer", "Branch", "IFSC", "MICR", "Statement"),
-        )
-
-    product_idx = _line_index_startswith(lines, "Product type")
-    if product_idx is not None and product_idx + 1 < len(lines):
-        if not customer:
-            customer = lines[product_idx + 1]
-        if not address:
-            address_lines: list[str] = []
-            for line in lines[product_idx + 2 :]:
-                lowered = line.lower()
-                if lowered.startswith(("email", "statement date", "cleared balance", "drawing power", "statement of account")):
-                    break
-                address_lines.append(line)
-            address = _clean_pdf_summary_value(" ".join(address_lines))
-
-    summary_idx = _line_index_startswith(lines, "Account Summary")
-    if summary_idx is not None:
-        current_balance_idx = _line_index_startswith(lines[summary_idx + 1 :], "Current Balance")
-        if current_balance_idx is not None:
-            current_balance_idx += summary_idx + 1
-            block_lines: list[str] = []
-            for line in lines[current_balance_idx + 1 :]:
-                lowered = line.lower()
-                if lowered.startswith(("acc.no", "account no", "customer id", "acc. type", "ckyc", "st. date", "st. period")):
-                    break
-                if re.fullmatch(r"[\d,]+(?:\.\d{1,2})?", line):
-                    continue
-                block_lines.append(line)
-            if block_lines:
-                if not customer:
-                    customer = block_lines[0]
-                if not address:
-                    address = _clean_pdf_summary_value(" ".join(block_lines[1:]))
-
-    return customer, address
-
-
-def _extract_statement_date_range(lines: list[str]) -> str:
-    text = "\n".join(lines[:160])
-    patterns = (
-        r"STATEMENT OF ACCOUNT\s+from\s+(.+?)\s+to\s+(.+?)(?:\n|$)",
-        r"For period:\s*(.+?)\s*-\s*(.+?)(?:\n|$)",
-        r"For the period\s+(.+?)\s+to\s+(.+?)(?:\n|$)",
-        r"St\.\s*Period\s*[:\-]?\s*(.+?)\s+to\s+(.+?)(?:\n|$)",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match is None:
-            continue
-        start_value = _format_statement_date(match.group(1))
-        end_value = _format_statement_date(match.group(2))
-        if start_value or end_value:
-            return f"{start_value} to {end_value}".strip()
-    return ""
-
-
 def _build_pdf_account_summary_rows(
     source_pdf_paths: list[Path] | None,
     source_pdf_passwords: list[str | None] | None = None,
 ) -> list[tuple[str, str]]:
-    pdf_path = Path(source_pdf_paths[0]) if source_pdf_paths else None
+    from src.utils.pdf_status_reader import read_first_page
+
+    if not source_pdf_paths:
+        return [(label, "Source PDF not provided") for label in PDF_ACCOUNT_SUMMARY_LABELS]
     password = source_pdf_passwords[0] if source_pdf_passwords else None
-    lines = _extract_first_page_lines(pdf_path, password) if pdf_path is not None else []
-    customer, address = _extract_customer_and_address(lines)
-
-    values = {
-        "Customer Name": customer,
-        "Bank Name": _extract_known_bank_name(lines, pdf_path),
-        "Account Number": _extract_account_number(lines),
-        "Address": address,
-        "Statement Date Between": _extract_statement_date_range(lines),
-    }
-    return [(label, values.get(label, "")) for label in PDF_ACCOUNT_SUMMARY_LABELS]
-
-
-def _pdf_status_row(
-    pdf_name: str,
-    check: str,
-    status: str,
-    result: str,
-    details: str = "",
-) -> dict[str, str]:
-    normalized_status = str(status).strip().upper()
-    if normalized_status not in PDF_STATUS_RANK:
-        normalized_status = "WARNING"
-    return {
-        "PDF": pdf_name,
-        "Check": check,
-        "Status": normalized_status,
-        "Result": result,
-        "Details": details,
-    }
-
-
-def _read_pdf_raw_indicators(
-    pdf_path: Path,
-) -> tuple[int | None, int | None, int | None, dict[str, int], dict[str, int], str]:
-    try:
-        raw = pdf_path.read_bytes()
-    except OSError as exc:
-        return None, None, None, {}, {}, str(exc)
-
-    eof_count = raw.count(b"%%EOF")
-    prev_count = len(re.findall(rb"/Prev\b", raw))
-    revision_counts = {
-        "%%EOF": eof_count,
-        "/Prev": prev_count,
-        "startxref": len(re.findall(rb"startxref\b", raw, flags=re.IGNORECASE)),
-        "xref_table": len(re.findall(rb"(?m)^\s*xref\s*$", raw)),
-        "xref_stream": len(re.findall(rb"/Type\s*/XRef\b", raw, flags=re.IGNORECASE)),
-    }
-    signature_count = len(re.findall(rb"/(?:FT\s*/Sig|Type\s*/Sig|Sig\b)", raw))
-    suspicious_counts = {
-        "JavaScript": len(re.findall(rb"/(?:JavaScript|JS)\b", raw, flags=re.IGNORECASE)),
-        "OpenAction": len(re.findall(rb"/OpenAction\b", raw, flags=re.IGNORECASE)),
-        "AdditionalActions": len(re.findall(rb"/AA\b", raw)),
-        "Launch": len(re.findall(rb"/Launch\b", raw, flags=re.IGNORECASE)),
-        "EmbeddedFile": len(re.findall(rb"/EmbeddedFile\b", raw, flags=re.IGNORECASE)),
-        "RichMedia": len(re.findall(rb"/RichMedia\b", raw, flags=re.IGNORECASE)),
-        "AcroForm": len(re.findall(rb"/AcroForm\b", raw, flags=re.IGNORECASE)),
-        "XFA": len(re.findall(rb"/XFA\b", raw)),
-    }
-    return eof_count, prev_count, signature_count, suspicious_counts, revision_counts, ""
-
-
-def _format_marker_counts(marker_counts: dict[str, int]) -> str:
-    if not marker_counts:
-        return ""
-    return "; ".join(f"{key}: {value}" for key, value in marker_counts.items() if value)
-
-
-def _count_pdf_annotations(pdf) -> int:
-    annotation_count = 0
-    for page in pdf:
-        try:
-            annotations = page.annots()
-            if annotations is None:
-                continue
-            annotation_count += sum(1 for _ in annotations)
-        except Exception:  # noqa: BLE001
-            continue
-    return annotation_count
-
-
-def _xml_local_name(name: str) -> str:
-    if "}" in name:
-        return name.rsplit("}", 1)[1]
-    if ":" in name:
-        return name.rsplit(":", 1)[1]
-    return name
-
-
-def _get_pdf_xmp_text(pdf) -> str:
-    getter = getattr(pdf, "get_xml_metadata", None)
-    if callable(getter):
-        try:
-            return str(getter() or "")
-        except Exception:  # noqa: BLE001
-            return ""
-    return ""
-
-
-def _summarize_xmp_history(history_element: ET.Element) -> str:
-    entries: list[str] = []
-    for descendant in history_element.iter():
-        if descendant is history_element:
-            continue
-        values: dict[str, str] = {}
-        for key, value in descendant.attrib.items():
-            local_key = _xml_local_name(key)
-            if local_key in {"action", "softwareAgent", "when"} and value:
-                values[local_key] = _clean_pdf_summary_value(value)
-        for child in descendant:
-            local_child = _xml_local_name(child.tag)
-            child_text = _clean_pdf_summary_value(" ".join(child.itertext()))
-            if local_child in {"action", "softwareAgent", "when"} and child_text:
-                values[local_child] = child_text
-        if values:
-            entry = ", ".join(
-                value
-                for key in ("action", "softwareAgent", "when")
-                if (value := values.get(key))
-            )
-            if entry and entry not in entries:
-                entries.append(entry)
-        if len(entries) >= 5:
-            break
-
-    if entries:
-        suffix = "" if len(entries) < 5 else " ..."
-        return " | ".join(entries) + suffix
-
-    text = _clean_pdf_summary_value(" ".join(history_element.itertext()))
-    return text[:500]
-
-
-def _extract_xmp_metadata(pdf) -> tuple[dict[str, str], str]:
-    xmp_text = _get_pdf_xmp_text(pdf)
-    if not xmp_text.strip():
-        return {}, ""
-
-    try:
-        root = ET.fromstring(xmp_text.encode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        return {}, str(exc)
-
-    values: dict[str, str] = {}
-    desired_fields = set(XMP_FIELD_LABELS)
-
-    for element in root.iter():
-        element_name = _xml_local_name(element.tag)
-        if element_name == "History" and "History" not in values:
-            history_summary = _summarize_xmp_history(element)
-            if history_summary:
-                values["History"] = history_summary
-
-        if element_name in desired_fields and element_name not in values:
-            element_text = _clean_pdf_summary_value(" ".join(element.itertext()))
-            if element_text:
-                values[element_name] = element_text[:500]
-
-        for attr_name, attr_value in element.attrib.items():
-            attr_local_name = _xml_local_name(attr_name)
-            if attr_local_name in desired_fields and attr_local_name not in values:
-                clean_value = _clean_pdf_summary_value(attr_value)
-                if clean_value:
-                    values[attr_local_name] = clean_value[:500]
-
-    return values, ""
+    header = read_first_page(Path(source_pdf_paths[0]), password)
+    return [(label, header.values.get(label) or "Not found on first page") for label in PDF_ACCOUNT_SUMMARY_LABELS]
 
 
 def _build_single_pdf_status_rows(pdf_path: Path, password: str | None = None) -> list[dict[str, str]]:
-    pdf_name = pdf_path.name
-    rows: list[dict[str, str]] = []
+    from src.transform.pdf_status import inspect_pdf
 
-    if not pdf_path.is_file():
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "File access",
-                "FAIL",
-                "PDF file was not found",
-                str(pdf_path),
-            )
-        )
-        return _with_overall_pdf_status(pdf_name, rows)
-
-    (
-        eof_count,
-        prev_count,
-        signature_count,
-        suspicious_counts,
-        revision_counts,
-        raw_error,
-    ) = _read_pdf_raw_indicators(pdf_path)
-    if raw_error:
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "Raw PDF scan",
-                "WARNING",
-                "Unable to scan raw PDF bytes",
-                raw_error,
-            )
-        )
-
-    authenticated = True
-    auth_message = ""
-    try:
-        with fitz.open(str(pdf_path)) as pdf:
-            needs_pass = bool(getattr(pdf, "needs_pass", False))
-            authenticated, auth_message = _authenticate_pdf_if_needed(pdf, password)
-            metadata = dict(pdf.metadata or {}) if authenticated else {}
-            page_count = int(getattr(pdf, "page_count", 0) or 0) if authenticated else 0
-            is_repaired = bool(getattr(pdf, "is_repaired", False))
-            annotation_count = _count_pdf_annotations(pdf) if authenticated else 0
-            if authenticated:
-                xmp_values, xmp_error = _extract_xmp_metadata(pdf)
-            else:
-                xmp_values, xmp_error = {}, auth_message
-    except Exception as exc:  # noqa: BLE001
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "File access",
-                "FAIL",
-                "PDF could not be opened",
-                str(exc),
-            )
-        )
-        return _with_overall_pdf_status(pdf_name, rows)
-
-    rows.append(
-        _pdf_status_row(
-            pdf_name,
-            "File access",
-            "PASS" if authenticated else "FAIL",
-            "PDF opened and password authenticated successfully"
-            if needs_pass and authenticated
-            else "PDF opened successfully"
-            if authenticated
-            else "PDF opened but password authentication failed",
-            str(pdf_path) if authenticated else auth_message,
-        )
-    )
-    rows.append(
-        _pdf_status_row(
-            pdf_name,
-            "Page count",
-            "PASS" if page_count > 0 else "FAIL",
-            f"{page_count} page(s) found",
-            "",
-        )
-    )
-    rows.append(
-        _pdf_status_row(
-            pdf_name,
-            "Encryption",
-            "WARNING" if needs_pass else "PASS",
-            "PDF is encrypted" if needs_pass else "PDF is not encrypted",
-            "Password authentication succeeded. Modification checks are still limited for encrypted PDFs."
-            if needs_pass and authenticated
-            else auth_message
-            if needs_pass
-            else "",
-        )
-    )
-    rows.append(
-        _pdf_status_row(
-            pdf_name,
-            "PDF structure repair",
-            "WARNING" if is_repaired else "PASS",
-            "PDF required repair while opening" if is_repaired else "No repair flag reported by parser",
-            "",
-        )
-    )
-
-    if eof_count is None or prev_count is None:
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "Incremental updates",
-                "WARNING",
-                "Unable to check raw update markers",
-                raw_error,
-            )
-        )
-    elif prev_count > 0 or eof_count > 1:
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "Incremental updates",
-                "FAIL",
-                "PDF contains incremental-update indicators",
-                f"/Prev markers: {prev_count}; %%EOF markers: {eof_count}. This commonly means the PDF was saved after its first revision.",
-            )
-        )
-    else:
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "Incremental updates",
-                "PASS",
-                "No incremental-update markers found",
-                f"/Prev markers: {prev_count}; %%EOF markers: {eof_count}.",
-            )
-        )
-
-    if revision_counts:
-        has_multiple_revisions = (
-            revision_counts.get("/Prev", 0) > 0
-            or revision_counts.get("%%EOF", 0) > 1
-            or revision_counts.get("startxref", 0) > 1
-        )
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "XRef revision indicators",
-                "FAIL" if has_multiple_revisions else "PASS",
-                "Multiple xref/save revisions indicated" if has_multiple_revisions else "Single xref/save revision indicated",
-                "; ".join(f"{key}: {value}" for key, value in revision_counts.items()),
-            )
-        )
-    else:
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "XRef revision indicators",
-                "WARNING",
-                "Unable to count xref revision indicators",
-                raw_error,
-            )
-        )
-
-    creation_raw = metadata.get("creationDate") or metadata.get("created")
-    modified_raw = metadata.get("modDate") or metadata.get("modificationDate")
-    created_at = _parse_pdf_metadata_datetime(creation_raw)
-    modified_at = _parse_pdf_metadata_datetime(modified_raw)
-    if created_at is not None and modified_at is not None:
-        modified_later = modified_at > created_at + timedelta(seconds=60)
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "Metadata dates",
-                "FAIL" if modified_later else "PASS",
-                "Modification date is after creation date" if modified_later else "Creation and modification dates match closely",
-                f"Created:   {_format_pdf_datetime(created_at)};\nModified: {_format_pdf_datetime(modified_at)}.",
-            )
-        )
-    else:
-        if not authenticated:
-            metadata_result = "Metadata could not be read because the PDF password was not authenticated"
-            metadata_details = auth_message
-        else:
-            metadata_result = "Creation or modification date is missing/unreadable"
-            metadata_details = f"Raw CreationDate: {creation_raw or ''}; Raw ModDate: {modified_raw or ''}."
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "Metadata dates",
-                "WARNING",
-                metadata_result,
-                metadata_details,
-            )
-        )
-
-    if xmp_error:
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "XMP metadata",
-                "WARNING",
-                "XMP metadata exists but could not be parsed",
-                xmp_error,
-            )
-        )
-    elif xmp_values:
-        xmp_details = "\n".join(
-            f"{label}: {xmp_values.get(field, '')}"
-            for field, label in XMP_FIELD_LABELS.items()
-            if xmp_values.get(field)
-        )
-        has_modify_history = any(xmp_values.get(field) for field in ("ModifyDate", "MetadataDate", "InstanceID", "History"))
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "XMP metadata",
-                "WARNING" if has_modify_history else "PASS",
-                "XMP metadata found",
-                xmp_details or "XMP packet found without tracked fields.",
-            )
-        )
-    else:
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "XMP metadata",
-                "WARNING",
-                "No XMP metadata packet found",
-                "Extended fields checked: xmp:CreateDate, xmp:ModifyDate, xmp:MetadataDate, xmp:CreatorTool, xmpMM:DocumentID, xmpMM:InstanceID, xmpMM:History.",
-            )
-        )
-
-    creator = str(metadata.get("creator") or "").strip()
-    producer = str(metadata.get("producer") or "").strip()
-    if creator:
-        creator_status = "PASS"
-        creator_result = "Creator metadata found"
-    elif producer:
-        creator_status = "WARNING"
-        creator_result = "Creator metadata is empty; producer metadata found"
-    else:
-        creator_status = "WARNING"
-        creator_result = "Creator and producer metadata are empty"
-    rows.append(
-        _pdf_status_row(
-            pdf_name,
-            "PDF creator",
-            creator_status,
-            creator_result,
-            f"Creator: {creator or ''}\nProducer: {producer or ''}",
-        )
-    )
-
-    rows.append(
-        _pdf_status_row(
-            pdf_name,
-            "Annotations",
-            "WARNING" if annotation_count > 0 else "PASS",
-            f"{annotation_count} annotation(s) found" if annotation_count > 0 else "No annotations found",
-            "Annotations can be added after original PDF creation." if annotation_count > 0 else "",
-        )
-    )
-
-    javascript_count = suspicious_counts.get("JavaScript", 0)
-    rows.append(
-        _pdf_status_row(
-            pdf_name,
-            "JavaScript",
-            "FAIL" if javascript_count > 0 else "PASS",
-            "JavaScript marker found" if javascript_count > 0 else "No JavaScript markers found",
-            f"JavaScript markers: {javascript_count}.",
-        )
-    )
-
-    active_suspicious_keys = ("JavaScript", "Launch", "EmbeddedFile", "RichMedia")
-    warning_suspicious_keys = ("OpenAction", "AdditionalActions", "AcroForm", "XFA")
-    active_suspicious_count = sum(suspicious_counts.get(key, 0) for key in active_suspicious_keys)
-    warning_suspicious_count = sum(suspicious_counts.get(key, 0) for key in warning_suspicious_keys)
-    suspicious_details = _format_marker_counts(suspicious_counts)
-    if active_suspicious_count > 0:
-        suspicious_status = "FAIL"
-        suspicious_result = "Suspicious active-content object markers found"
-    elif warning_suspicious_count > 0:
-        suspicious_status = "WARNING"
-        suspicious_result = "Potentially sensitive PDF object markers found"
-    else:
-        suspicious_status = "PASS"
-        suspicious_result = "No suspicious object markers found"
-    rows.append(
-        _pdf_status_row(
-            pdf_name,
-            "Suspicious objects",
-            suspicious_status,
-            suspicious_result,
-            suspicious_details or "Scanned JavaScript, launch, embedded file, rich media, forms, XFA, and open-action markers.",
-        )
-    )
-
-    abnormal_checks = {
-        "PDF structure repair",
-        "Incremental updates",
-        "XRef revision indicators",
-        "Metadata dates",
-        "XMP metadata",
-        "Annotations",
-        "JavaScript",
-        "Suspicious objects",
-    }
-    abnormal_rows = [
-        row
-        for row in rows
-        if row.get("Check") in abnormal_checks and row.get("Status") in {"WARNING", "FAIL"}
-    ]
-    if any(row.get("Status") == "FAIL" for row in abnormal_rows):
-        abnormal_status = "FAIL"
-        abnormal_result = "Abnormal or high-risk PDF indicators found"
-    elif abnormal_rows:
-        abnormal_status = "WARNING"
-        abnormal_result = "Abnormal PDF indicators need review"
-    else:
-        abnormal_status = "PASS"
-        abnormal_result = "No abnormal PDF indicators found"
-    rows.append(
-        _pdf_status_row(
-            pdf_name,
-            "Abnormal detection",
-            abnormal_status,
-            abnormal_result,
-            "; ".join(f"{row['Check']}: {row['Result']}" for row in abnormal_rows) if abnormal_rows else "",
-        )
-    )
-
-    if signature_count is None:
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "Digital signature",
-                "WARNING",
-                "Unable to scan for signature markers",
-                raw_error,
-            )
-        )
-    elif signature_count > 0:
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "Digital signature",
-                "WARNING",
-                "Signature marker detected",
-                "This workbook flags the marker only; cryptographic signature validation is not performed.",
-            )
-        )
-    else:
-        rows.append(
-            _pdf_status_row(
-                pdf_name,
-                "Digital signature",
-                "WARNING",
-                "No digital signature detected",
-                "Without a valid digital signature, no tool can prove the PDF was never modified.",
-            )
-        )
-
-    return _with_overall_pdf_status(pdf_name, rows)
-
-
-def _with_overall_pdf_status(pdf_name: str, rows: list[dict[str, str]]) -> list[dict[str, str]]:
-    if not rows:
-        return [
-            _pdf_status_row(
-                pdf_name,
-                "Overall PDF modification status",
-                "WARNING",
-                "No PDF checks were available",
-                "",
-            )
-        ]
-
-    worst_status = max(rows, key=lambda row: PDF_STATUS_RANK.get(row.get("Status", "WARNING"), 1))["Status"]
-    if worst_status == "FAIL":
-        result = "Potential modification indicators found"
-    elif worst_status == "WARNING":
-        result = "No confirmed modification, but verification is limited"
-    else:
-        result = "No modification indicators found"
-
-    return [
-        _pdf_status_row(
-            pdf_name,
-            "Overall PDF modification status",
-            worst_status,
-            result,
-            "Review any FAIL or WARNING rows below.",
-        ),
-        *rows,
-    ]
+    return inspect_pdf(Path(pdf_path), password)
 
 
 def _build_pdf_status_sheet(
     source_pdf_paths: list[Path] | None,
     source_pdf_passwords: list[str | None] | None = None,
 ) -> pd.DataFrame:
-    if not source_pdf_paths:
-        rows = [
-            _pdf_status_row(
-                "",
-                "Overall PDF modification status",
-                "WARNING",
-                "Source PDF path was not provided",
-                "Run through the CLI to include source PDF integrity checks.",
-            )
-        ]
-        return pd.DataFrame(rows, columns=PDF_STATUS_COLUMNS)
+    from src.transform.pdf_status import row
 
-    rows: list[dict[str, str]] = []
-    for index, pdf_path in enumerate(source_pdf_paths):
-        password = (
-            source_pdf_passwords[index]
-            if source_pdf_passwords is not None and index < len(source_pdf_passwords)
-            else None
-        )
-        rows.extend(_build_single_pdf_status_rows(Path(pdf_path), password))
+    if not source_pdf_paths:
+        return pd.DataFrame([row("", "Overall PDF modification status", "WARNING",
+                                 "Source PDF path was not provided",
+                                 "Run through the CLI to include source PDF integrity checks.")],
+                            columns=PDF_STATUS_COLUMNS)
+    rows = []
+    for index, path in enumerate(source_pdf_paths):
+        password = source_pdf_passwords[index] if source_pdf_passwords and index < len(source_pdf_passwords) else None
+        rows.extend(_build_single_pdf_status_rows(Path(path), password))
+    if len(source_pdf_paths) > 1:
+        rows.insert(0, row("", "Account summary scope", "PASS", "Top summary refers to the first PDF",
+                           "Each PDF's first-page fields and modification findings are listed separately below."))
     return pd.DataFrame(rows, columns=PDF_STATUS_COLUMNS)
 
 
@@ -1554,10 +751,19 @@ def _apply_final_layout(workbook) -> None:
     date_headers = {"date", "txndate", "valuedate"}
 
     for ws in workbook.worksheets:
+        if ws.title.lower() == PDF_STATUS_SHEET_NAME.lower():
+            continue
+
         date_columns = {
             col_idx
             for col_idx in range(1, ws.max_column + 1)
             if _normalize_header(ws.cell(row=1, column=col_idx).value) in date_headers
+        }
+        amount_columns = {
+            col_idx
+            for col_idx in range(1, ws.max_column + 1)
+            if _normalize_header(ws.cell(row=1, column=col_idx).value)
+            in {"debit", "credit", "balance"}
         }
 
         for row_idx in range(1, ws.max_row + 1):
@@ -1582,12 +788,19 @@ def _apply_final_layout(workbook) -> None:
                 value = ws.cell(row=row_idx, column=col_idx).value
                 if value is None:
                     continue
-                max_length = max(
-                    max_length,
-                    max((len(line) for line in str(value).splitlines()), default=0),
+                display_length = (
+                    _displayed_amount_length(value)
+                    if col_idx in amount_columns and row_idx > 1
+                    else max((len(line) for line in str(value).splitlines()), default=0)
                 )
-            # Excel supports widths only up to 255 characters.
-            ws.column_dimensions[column_letter].width = min(max(max_length + 2, 10), 255)
+                max_length = max(max_length, display_length)
+            if col_idx in amount_columns:
+                ws.column_dimensions[column_letter].width = min(
+                    max(AMOUNT_COLUMN_WIDTH, max_length + AMOUNT_COLUMN_PADDING), 255
+                )
+            else:
+                # Excel supports widths only up to 255 characters.
+                ws.column_dimensions[column_letter].width = min(max(max_length + 2, 10), 255)
 
 
 def _apply_month_dr_cr_style(workbook, sheet_name: str) -> None:
@@ -1643,7 +856,16 @@ def _apply_month_dr_cr_style(workbook, sheet_name: str) -> None:
     }
     for col_idx in range(2, data_max_col + 1):
         header_value = str(ws.cell(row=1, column=col_idx).value or "").strip()
-        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width_map.get(header_value, 14)
+        column_letter = ws.cell(row=1, column=col_idx).column_letter
+        max_length = max(
+            (_displayed_amount_length(ws.cell(row=row_idx, column=col_idx).value)
+             for row_idx in range(2, data_max_row + 1)
+             if ws.cell(row=row_idx, column=col_idx).value is not None),
+            default=len(header_value),
+        )
+        ws.column_dimensions[column_letter].width = min(
+            max(width_map.get(header_value, 14), max_length + AMOUNT_COLUMN_PADDING), 255
+        )
 
     footnote_row = data_max_row + 2
     ws.merge_cells(start_row=footnote_row, start_column=1, end_row=footnote_row, end_column=data_max_col)
@@ -2376,21 +1598,37 @@ def _apply_pdf_status_style(
         cell.font = Font(name="Aptos", size=10, bold=True)
         cell.alignment = ALIGN_CENTER
 
+    table_widths: dict[int, float] = {}
     for col_idx in range(1, ws.max_column + 1):
         column_letter = ws.cell(row=table_header_row, column=col_idx).column_letter
-        if col_idx == 1:
-            ws.column_dimensions[column_letter].width = 22
-        elif col_idx == 2:
-            ws.column_dimensions[column_letter].width = 32
-        elif col_idx == 3:
-            ws.column_dimensions[column_letter].width = 14
-        elif col_idx == 4:
-            ws.column_dimensions[column_letter].width = 42
-        else:
-            ws.column_dimensions[column_letter].width = 70
+        max_length = max(
+            (len(line)
+             for row_idx in range(table_header_row, ws.max_row + 1)
+             for line in str(ws.cell(row=row_idx, column=col_idx).value or "").split("\n")),
+            default=0,
+        )
+        width = min(max(max_length + 4, 10), PDF_STATUS_MAX_COLUMN_WIDTH)
+        ws.column_dimensions[column_letter].width = width
+        table_widths[col_idx] = width
 
     for row_idx in range(1, ws.max_row + 1):
-        ws.row_dimensions[row_idx].height = 30 if row_idx <= len(PDF_ACCOUNT_SUMMARY_LABELS) else 36
+        if row_idx <= len(PDF_ACCOUNT_SUMMARY_LABELS):
+            label = str(ws.cell(row=row_idx, column=1).value or "")
+            value = str(ws.cell(row=row_idx, column=2).value or "")
+            label_width = max(1, int(table_widths.get(1, 10)) - 3)
+            value_width = max(1, int(sum(table_widths.get(col, 10) for col in range(2, 6))) - 3)
+            label_lines = max(1, (len(label) + label_width - 1) // label_width)
+            value_lines = max(1, (len(value) + value_width - 1) // value_width)
+            ws.row_dimensions[row_idx].height = min(409, max(30, 14 * max(label_lines, value_lines) + 8))
+        else:
+            line_counts = []
+            for col, width in table_widths.items():
+                text = str(ws.cell(row=row_idx, column=col).value or "")
+                usable_width = max(1, int(width) - 3)
+                line_counts.append(
+                    sum(max(1, (len(line) + usable_width - 1) // usable_width) for line in text.split("\n"))
+                )
+            ws.row_dimensions[row_idx].height = min(409, max(36, 14 * max(line_counts) + 8))
 
 
 def _force_leading_equals_to_text(workbook) -> None:
