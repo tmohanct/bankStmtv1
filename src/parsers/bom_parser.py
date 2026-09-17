@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import re
 from typing import Any
-
 import pdfplumber
+from src.utils.statement_utils import clean_cell, clean_detail, normalize_date, parse_amount
 
-from utils import clean_cell, clean_detail, normalize_date, parse_amount
 
 SERIAL_RE = re.compile(r"^\d+$")
 
@@ -105,3 +104,7 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
 
 # PDF_Status only. Transaction parsing does not use this profile.
 PDF_STATUS_PROFILE = {'name': 'Bank of Maharashtra', 'ifsc': 'MAHB', 'aliases': ['Bank of Maharashtra', 'Maharashtra Bank']}
+
+
+BANK_CODE = 'bom'
+BANK_SIGNATURES = (('BANK OF MAHARASHTRA', 4), ('MAHB0', 3), ('MAHABANK.CO.IN', 1))

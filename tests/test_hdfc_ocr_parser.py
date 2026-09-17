@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import logging
-import sys
 import unittest
 from decimal import Decimal
-from pathlib import Path
 from unittest.mock import patch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(PROJECT_ROOT / "src" / "code"), str(PROJECT_ROOT / "src")]
 
-import hdfc_parser
-from parsers import hdfc_parser as hdfc_ocr
+from src.parsers import hdfc_parser
+from src.parsers import hdfc_parser as hdfc_ocr
 
 
 def word(text: str, left: int, top: int, width: int = 90) -> hdfc_ocr._Word:

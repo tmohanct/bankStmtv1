@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import sys
 import logging
 import unittest
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-from icici_parser import (
+from src.parsers.icici_parser import (
     TextLine,
     _extract_account_statement_block_seed,
     _extract_account_statement_blocks,

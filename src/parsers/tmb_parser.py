@@ -7,11 +7,10 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-
 import pandas as pd
 import pdfplumber
+from src.parsers.base_parser import BaseStatementParser
 
-from parsers.base_parser import BaseStatementParser
 
 DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{4}$")
 TABLE_DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
@@ -354,3 +353,10 @@ class TMBParser(BaseStatementParser):
 
 # PDF_Status only. Transaction parsing does not use this profile.
 PDF_STATUS_PROFILE = {'name': 'Tamilnad Mercantile Bank', 'ifsc': 'TMBL', 'aliases': ['Tamilnad Mercantile Bank']}
+
+def parse(pdf_path: str, logger, progress_cb=None):
+    return parse_tmb_records(pdf_path=pdf_path, logger=logger, progress_cb=progress_cb)
+
+
+BANK_CODE = 'tmb'
+BANK_SIGNATURES = (('TAMILNAD MERCANTILE BANK', 8), ('TAMILNADU MERCANTILE BANK', 8), ('TMBL0', 5))

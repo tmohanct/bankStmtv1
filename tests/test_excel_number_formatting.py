@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import sys
 import unittest
 from pathlib import Path
 
@@ -10,10 +9,12 @@ import pandas as pd
 from openpyxl import load_workbook
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-from final_excel_builder import INDIAN_NUMBER_FORMAT_NO_DECIMAL, build_final_workbook
-from utils import OUTPUT_COLUMNS, clean_detail
+from src.export.final_excel_builder import (
+    INDIAN_NUMBER_FORMAT_NO_DECIMAL,
+    build_final_workbook,
+)
+from src.utils.statement_utils import OUTPUT_COLUMNS, clean_detail
 
 
 def _statement_frame() -> pd.DataFrame:
@@ -45,7 +46,7 @@ def _statement_frame() -> pd.DataFrame:
 
 
 class ExcelNumberFormattingTests(unittest.TestCase):
-    def test_final_workbook_rounds_money_cells_and_uses_indian_no_decimal_format(self) -> None:
+    def test_final_workbook_preserves_money_values_with_no_decimal_display(self) -> None:
         statement_df = _statement_frame()
         logger = logging.getLogger("tests.excel_number_formatting")
         logger.handlers.clear()
@@ -75,27 +76,27 @@ class ExcelNumberFormattingTests(unittest.TestCase):
                 self.assertNotIn("Detail_Clean", headers, worksheet.title)
 
             statement_ws = workbook["Statement"]
-            self.assertEqual(statement_ws["E2"].value, 70000)
+            self.assertEqual(statement_ws["E2"].value, 70000.4)
             self.assertEqual(statement_ws["E2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
-            self.assertEqual(statement_ws["G2"].value, -5498056)
+            self.assertEqual(statement_ws["G2"].value, -5498055.96)
             self.assertEqual(statement_ws["G2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
-            self.assertEqual(statement_ws["F3"].value, 2721)
+            self.assertEqual(statement_ws["F3"].value, 2720.5)
             self.assertEqual(statement_ws["F3"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
 
             ret_rej_ws = workbook["Ret_Rej"]
-            self.assertEqual(ret_rej_ws["E2"].value, 70000)
-            self.assertEqual(ret_rej_ws["G2"].value, -5498056)
+            self.assertEqual(ret_rej_ws["E2"].value, 70000.4)
+            self.assertEqual(ret_rej_ws["G2"].value, -5498055.96)
             self.assertEqual(ret_rej_ws["E2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
 
             month_ws = workbook["month_dr_cr"]
-            self.assertEqual(month_ws["B2"].value, 70000)
-            self.assertEqual(month_ws["C2"].value, 2721)
-            self.assertEqual(month_ws["D2"].value, -67280)
-            self.assertEqual(month_ws["E2"].value, -5495335)
-            self.assertEqual(month_ws["H2"].value, 70000)
-            self.assertEqual(month_ws["I2"].value, 2721)
-            self.assertEqual(month_ws["B2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
-            self.assertEqual(month_ws["I2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
+            self.assertEqual(month_ws["B3"].value, 70000.4)
+            self.assertEqual(month_ws["C3"].value, 2720.5)
+            self.assertEqual(month_ws["D3"].value, -67279.9)
+            self.assertEqual(month_ws["E3"].value, -5495335.46)
+            self.assertEqual(month_ws["H3"].value, 70000.4)
+            self.assertEqual(month_ws["I3"].value, 2720.5)
+            self.assertEqual(month_ws["B3"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
+            self.assertEqual(month_ws["I3"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
 
             workbook.close()
         finally:

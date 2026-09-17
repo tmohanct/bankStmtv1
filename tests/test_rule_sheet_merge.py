@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import sys
 import unittest
 from pathlib import Path
 
@@ -10,10 +9,11 @@ import pandas as pd
 from openpyxl import load_workbook
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-from final_excel_builder import build_final_workbook
-from utils import OUTPUT_COLUMNS, clean_detail
+from src.export.final_excel_builder import (
+    build_final_workbook,
+)
+from src.utils.statement_utils import OUTPUT_COLUMNS, clean_detail
 
 
 def _statement_frame() -> pd.DataFrame:
@@ -114,7 +114,7 @@ class RuleSheetMergeTests(unittest.TestCase):
             self.assertNotIn("wilson_1", workbook.sheetnames)
             workbook.close()
 
-            wilson_df = pd.read_excel(final_path, sheet_name="wilson")
+            wilson_df = pd.read_excel(final_path, sheet_name="wilson", header=1, usecols="A:H", nrows=4)
             self.assertListEqual(wilson_df["Sno"].tolist(), [1, 2, 3, 4])
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)

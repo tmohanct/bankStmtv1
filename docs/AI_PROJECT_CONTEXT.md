@@ -8,24 +8,17 @@ The project is designed to support many banks. PDFs can be text-based or, for se
 
 ## Start Here: What Actually Runs
 
-There are two implementations in the repository. They must not be confused.
+All launchers use `src/main.py`. The root launcher and batch files prefer a healthy local virtual environment. `src/code/` contains compatibility imports, not a second implementation.
 
-1. **Active production implementation: `src/code/`**
-   - Top-level `run.py` starts `src/code/run.py`.
-   - `stmt.bat` and `run_bank_parser.bat` also start `src/code/run.py`.
-   - This is the feature-complete path and is the path used for normal customer work.
-
-2. **New modular implementation: `src/parsers/`, `src/transform/`, `src/export/`, and `src/main.py`**
-   - This is a migration/scaffold toward a cleaner architecture.
-   - It is not the default runtime path.
-   - It has only a smaller parser registry and some unfinished pieces (notably the modular Axis parser and automatic detection).
-   - Do not switch the launcher to this path without completing parity work and regression testing.
-
-When changing live behavior, make the change in the active `src/code/` path unless the task explicitly concerns the migration.
+- Bank extraction and detection signatures: `src/parsers/<bank>_parser.py`.
+- One discovered registry for all 24 banks: `src/parsers/parser_registry.py`.
+- Normalization, overlap removal, validation: `src/transform/`.
+- Intermediate/final Excel output and text safety: `src/export/`.
+- Shared parsing/file helpers: `src/utils/`.
 
 ## Runtime Flow
 
-The active entry point is `src/code/run.py`.
+The active entry point is `src/main.py`.
 
 ```text
 CLI / batch launcher
@@ -86,7 +79,7 @@ It normally includes these sheets:
 
 - `PDF_Status`: heuristic PDF integrity/modification indicators and first-PDF account summary.
 - `Statement`: complete parsed statement.
-- `Ret/Rej`: transactions whose details indicate cheque/electronic return, rejection, dishonour, or related charges.
+- `Ret_Rej`: cheque return/rejection transactions detected by `src/transform/cheque_returns.py`; excludes electronic returns, fees/charges, and explicit reversals. Supports cheque numbers and blank-narration fallback to `Detail_Clean`.
 - Rule-based sheets: matching transactions, grouped by `SheetName` in the rules workbook.
 - `Cheque_Transactions`: rows with a usable cheque number.
 - `Repeat_Credit_Amount` and `Repeat_Debit_Amount`: amounts occurring more than twice.
@@ -103,10 +96,12 @@ The supported columns are case-insensitive aliases of:
 
 | Recommended column | Purpose |
 | --- | --- |
-| `Order` | Sort order for output rule sheets |
-| `Category` | `AMT` for an amount rule; any other value is a text rule |
-| `subCategory` | Text to find in `Detail_Clean`, or the numeric amount for `AMT` |
+| `Order` | Optional sort order for output rule sheets; defaults to workbook row order |
+| `Category` | Optional: `AMT` for an amount rule; defaults to text matching |
+| `searchString` | Text to find in `Detail_Clean`, or the numeric amount for `AMT`; legacy `subCategory` is also accepted |
 | `SheetName` | Target analysis-sheet name |
+
+For text rules, only `searchString` and `SheetName` are required. For example, `RAMASAMY` and `KANCHANA` can both target the `RAMASAMY` sheet.
 
 Text matching is case-insensitive and matches against a compact alphanumeric version of narration. Amount rules match either debit or credit within a small tolerance. Multiple rules targeting the same `SheetName` are merged into one worksheet and duplicate statement rows are removed.
 
@@ -124,7 +119,7 @@ icici, idbi, idfc, indian, indus, iob, kvb, kotak, pnb, sbi,
 southind, tmb, unionbank
 ```
 
-`src/code/bank_detector.py` uses weighted text signatures such as bank names and IFSC prefixes. It deliberately checks extracted document text before OCR because OCR is slower and less reliable.
+`src/parsers/detector.py` uses weighted text signatures such as bank names and IFSC prefixes. It deliberately checks extracted document text before OCR because OCR is slower and less reliable.
 
 Each parser returns transaction dictionaries in the common legacy structure. Parsers use the extraction strategy best suited to the PDF layout:
 
@@ -133,19 +128,11 @@ Each parser returns transaction dictionaries in the common legacy structure. Par
 - Tesseract OCR in selected bank parsers and detection fallbacks.
 - Bank-specific heuristics for dates, debit/credit conventions, balances, continuation lines, and cheque references.
 
-Some active legacy parser modules delegate to reusable code under `src/parsers/`:
-
-- `boi`
-- `kotak`
-- `southind`
-- `tmb`
-- `unionbank`
-
-The remaining active parsers are implemented directly in `src/code/`.
+All bank parsers now live under `src/parsers/`. Old `src/code/` imports delegate to these modules.
 
 ## Shared Active-Path Behavior
 
-`src/code/utils.py` contains important shared behavior:
+Shared parsing helpers, normalization, validation and export modules provide:
 
 - Parses amount text including commas and CR/DR markers.
 - Normalizes several date formats.
@@ -154,34 +141,16 @@ The remaining active parsers are implemented directly in `src/code/`.
 - Sanitizes cheque values so transaction IDs from UPI/IMPS/NEFT/RTGS are not incorrectly labelled as cheque numbers.
 - Extracts cheque numbers from narration when explicit cheque columns are unreliable.
 - Writes leading `=` strings as text so Excel does not treat statement content as formulas.
-- Reconciles parsed transaction counts/debit/credit totals against summary values discoverable in the PDF and logs mismatches.
+- Reconciles parsed transaction counts/debit/credit totals against summary values discoverable in the PDF and returns explicit passed/failed/unavailable results.
 
-`src/code/final_excel_builder.py` is responsible for all final-sheet generation, spreadsheet styling, Indian number formatting, PDF-status checks, and month-wise chart formatting.
+`src/export/final_excel_builder.py` assembles and styles final sheets, including Indian number formatting and PDF-status presentation. Rule matching and transaction summaries live in `src/transform/analysis.py`; monthly chart image rendering lives in `src/export/monthly_chart.py`. Tesseract discovery is shared through `src/utils/ocr.py`.
 
-## New Modular Architecture (Migration Target)
+## Data contract and validation
 
-The intended newer architecture is:
+The active record schema remains `Sno, Date, Details, Detail_Clean, Cheque No, Debit, Credit, Balance, Source`.
+Internal account/source metadata is removed before export. Repeated rows within one PDF are preserved. Cross-PDF overlap removal requires a known, unmasked account identity and at least two consecutive exact matches including running balances. Ambiguous matches are retained.
 
-```text
-src/parsers/<bank>_parser.py  -> bank-specific extraction
-src/transform/                -> normalization and validation
-src/export/                   -> workbook output
-src/utils/                    -> shared helpers
-```
-
-Its normalized target schema is:
-
-```text
-Txn_Date, Value_Date, Description, Debit, Credit, Balance,
-Currency, Bank, Account_Number, Reference, Source_Page
-```
-
-The modular registry currently contains only `axis`, `boi`, `iob`, `kotak`, `southind`, `tmb`, and `unionbank`. It should be treated as a work in progress:
-
-- `src/parsers/axis_parser.py` does not yet extract transactions.
-- `src/parsers/detector.py` intentionally raises `NotImplementedError` for automatic detection.
-- `src/transform/validate.py` only checks required columns and rejects rows with both debit and credit populated.
-- `src/export/final_excel_builder.py` currently creates only `Transactions` and `Metadata` sheets, not the complete analytical workbook.
+Empty parses, invalid dates/amounts and mismatched printed totals stop the run before workbook output with exit code 1. Missing printed totals are reported as reconciliation unavailable, not a pass. Monetary cell values retain decimal precision; number formats may display whole units.
 
 ## Testing
 
@@ -204,15 +173,15 @@ Parser changes should be validated using representative PDFs for the affected ba
 5. Treat PDF extraction as imperfect. A successful run does not prove every row is correct.
 6. Keep the `Source` column and final serial numbering correct when processing multiple PDFs.
 7. Do not rely on `PDF_Status` as legal-grade tamper detection.
-8. Avoid changing the default launcher to `src/main.py` until the modular path reaches feature parity.
+8. Keep old import compatibility wrappers thin; make behavior changes in the canonical modules.
 
 ## Known Maintenance Risks
 
-- The coexistence of active legacy and newer modular paths can cause fixes to land in the wrong place.
+- Compatibility wrappers under `src/code/` must continue delegating to the canonical implementation.
 - The default rule-file name does not currently match the rule workbooks visible in `input/`.
 - PDF formats can change without notice; extraction uses layout-sensitive heuristics.
 - OCR requires the external Tesseract application in addition to the Python dependency.
-- Reconciliation is advisory: mismatches are logged, not used to stop generation.
+- Reconciliation can only check summary values present in extractable PDF text; missing totals are reported explicitly.
 - The active final builder is large and handles both data logic and presentation logic, so changes there need focused tests.
 
 ## Key Files
@@ -220,17 +189,22 @@ Parser changes should be validated using representative PDFs for the affected ba
 | File | Role |
 | --- | --- |
 | `run.py` | Root launcher; prefers the project virtual environment then starts the active runner |
-| `src/code/run.py` | Active CLI orchestration |
-| `src/code/bank_detector.py` | Automatic bank identification |
-| `src/code/utils.py` | Shared parsing, normalization, file, Excel, and reconciliation helpers |
-| `src/code/*_parser.py` | Active bank parsers and wrappers |
-| `src/code/final_excel_builder.py` | Full analytical workbook builder |
-| `src/main.py` | New modular pipeline entry point; not the default path |
-| `src/parsers/` | New modular parser implementation/migration target |
-| `src/transform/` | New normalization and validation layer |
-| `src/export/` | New export layer |
+| `src/main.py` | Active CLI orchestration |
+| `src/parsers/detector.py` | Automatic bank identification |
+| `src/utils/statement_utils.py` | Shared extraction, amount/date and input-file helpers |
+| `src/transform/normalize.py` | Cheque normalization and conservative overlap removal |
+| `src/transform/validate.py` | Record validation and reconciliation |
+| `src/export/excel_writer.py` | Intermediate export |
+| `src/parsers/*_parser.py` | Active bank parsers and wrappers |
+| `src/transform/analysis.py` | Rule matching and analytical tables |
+| `src/export/monthly_chart.py` | Monthly chart rendering |
+| `src/export/final_excel_builder.py` | Workbook assembly and styling |
+| `src/utils/ocr.py` | Shared Tesseract discovery |
+| `src/code/` | Compatibility wrappers for old imports |
+| `src/parsers/` | Canonical bank parsers and detection signatures |
+| `src/transform/` | Normalization and validation |
+| `src/export/` | Workbook exports |
 | `tests/` | Regression and behavior tests |
 | `input/` | PDFs and rule workbook |
 | `output/` | Generated Excel workbooks |
 | `src/logs/` | Runtime logs created by the active runner |
-

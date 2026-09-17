@@ -22,7 +22,7 @@ Use `python run.py --help` to display the live option list. `--file` and `--pdf`
 
 ## Active bank codes
 
-`axis`, `bob`, `boi`, `bom`, `canara`, `central`, `cub`, `dbs`, `federal`, `hdfc`, `icici`, `idbi`, `idfc`, `indian`, `indus`, `iob`, `kotak`, `kvb`, `pnb`, `sbi`, `southind`, `tmb`, and `unionbank`.
+`axis`, `bob`, `boi`, `bom`, `canara`, `central`, `cub`, `dbs`, `esfb`, `federal`, `hdfc`, `icici`, `idbi`, `idfc`, `indian`, `indus`, `iob`, `kotak`, `kvb`, `pnb`, `sbi`, `southind`, `tmb`, and `unionbank`.
 
-TMB currently requires explicit `--bank tmb` because it has an active parser but no auto-detection signature.
+TMB supports auto-detection using its bank name and IFSC prefix. All launchers share the same 24-bank registry.
 

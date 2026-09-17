@@ -200,3 +200,16 @@ cython_debug/
 .cursorindexingignore
 
 tmp*/
+
+# Local source backups
+*.bak
+
+# Local SQLite run history and sidecar files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*

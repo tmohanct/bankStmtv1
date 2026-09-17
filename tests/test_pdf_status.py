@@ -1,6 +1,5 @@
 """PDF_Status regressions using synthetic PDFs, without customer data."""
 import hashlib
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,9 +8,7 @@ from unittest.mock import patch
 import fitz
 from openpyxl import Workbook
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'src' / 'code'))
-import final_excel_builder as builder
+from src.export import final_excel_builder as builder
 from src.transform.pdf_status import inspect_pdf, metadata_datetime
 from src.utils.pdf_status_reader import read_first_page
 
@@ -187,6 +184,196 @@ class PDFStatusTests(unittest.TestCase):
         self.assertEqual(values['Customer Name'], 'ALPHA TRADERS')
         self.assertEqual(values['Account Number'], '000XXXX789')
         self.assertEqual(values['Address'], '21 CUSTOMER ROAD')
+
+    def image_bytes(self):
+        pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 10, 10), False)
+        pixmap.clear_with(255)
+        return pixmap.tobytes('png')
+
+    def save_rewrite(self, modify):
+        create_pdf(self.path)
+        rewritten = self.path.with_name('rewritten.pdf')
+        with fitz.open(self.path) as doc:
+            modify(doc)
+            doc.save(rewritten, garbage=4, deflate=True)
+        return rewritten
+
+    def test_rewritten_image_coverup_is_detected(self):
+        path = self.save_rewrite(lambda doc: doc[0].insert_image(
+            fitz.Rect(38, 202, 330, 220), stream=self.image_bytes(), keep_proportion=False))
+        rows = audit(path)
+        self.assertEqual(rows[0]['Result'], 'Possible manual editing - review evidence')
+        evidence = next(r for r in rows if r['Check'] == 'Image overlays')
+        self.assertEqual(evidence['Status'], 'WARNING')
+        self.assertIn('Page 1', evidence['Details'])
+
+    def test_image_background_preceding_text_is_not_coverup(self):
+        path = self.save_rewrite(lambda doc: doc[0].insert_image(
+            fitz.Rect(38, 202, 330, 220), stream=self.image_bytes(), keep_proportion=False, overlay=False))
+        self.assertEqual(audit(path)[0]['Status'], 'PASS')
+
+    def test_conflicting_amounts_without_rectangle(self):
+        def modify(doc):
+            page = doc[0]
+            rect = page.search_for('100.00')[0]
+            page.insert_text((rect.x0, 215), '900.00', fontsize=10)
+        rows = audit(self.save_rewrite(modify))
+        evidence = next(r for r in rows if r['Check'] == 'Conflicting amount overprints')
+        self.assertEqual(evidence['Status'], 'WARNING')
+        self.assertIn("'100.00' and '900.00'", evidence['Details'])
+
+    def test_duplicate_amount_paint_is_not_edit_evidence(self):
+        def modify(doc):
+            page = doc[0]
+            rect = page.search_for('100.00')[0]
+            page.insert_text((rect.x0, 215), '100.00', fontsize=10)
+        self.assertEqual(audit(self.save_rewrite(modify))[0]['Status'], 'PASS')
+
+    def test_large_image_with_readable_header_is_inconclusive(self):
+        path = self.save_rewrite(lambda doc: doc[0].insert_image(
+            fitz.Rect(0, 250, 595, 842), stream=self.image_bytes(), keep_proportion=False))
+        rows = audit(path)
+        self.assertEqual(rows[0]['Result'], 'Inconclusive - inspection has limitations')
+        self.assertIn('Large raster images', rows[0]['Details'])
+
+    def test_xmp_only_editor_is_reported(self):
+        path = self.save_rewrite(lambda doc: doc.set_xml_metadata(
+            '<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:xmp="http://ns.adobe.com/xap/1.0/">'
+            '<xmp:CreatorTool>Microsoft Word</xmp:CreatorTool></x:xmpmeta>'))
+        self.assertIn('Editing software recorded in XMP', audit(path)[0]['Details'])
+
+    def test_invalid_metadata_date_requires_review(self):
+        create_pdf(self.path, {'creationDate': 'D:20261399999999', 'modDate': 'D:20260101000000Z'})
+        rows = audit(self.path)
+        self.assertEqual(next(r['Result'] for r in rows if r['Check'] == 'Metadata dates'), 'Invalid metadata date')
+        self.assertEqual(rows[0]['Status'], 'WARNING')
+
+    def test_failure_does_not_erase_confirmed_revision_change(self):
+        create_pdf(self.path)
+        with fitz.open(self.path) as doc:
+            doc[0].insert_text((40, 240), 'Extra transaction 5000.00')
+            doc.saveIncr()
+        for target in ('page_evidence', 'object_evidence'):
+            with self.subTest(target=target), patch('src.transform.pdf_status.' + target, side_effect=RuntimeError('failed')):
+                rows = audit(self.path)
+            self.assertEqual(rows[0]['Status'], 'FAIL')
+            self.assertIn('Limitations:', rows[0]['Details'])
+            self.assertTrue(any(r['Check'] == 'Saved revision content comparison' for r in rows))
+
+    def test_failed_revision_render_preserves_text_change(self):
+        create_pdf(self.path)
+        with fitz.open(self.path) as doc:
+            doc[0].insert_text((40, 240), 'Extra transaction 5000.00')
+            doc.saveIncr()
+        with patch('src.transform.pdf_status._page_digest', side_effect=RuntimeError('render failed')):
+            rows = audit(self.path)
+        self.assertEqual(rows[0]['Status'], 'FAIL')
+        self.assertIn('comparison failed', rows[0]['Details'])
+
+    def test_failed_page_check_cannot_pass(self):
+        create_pdf(self.path)
+        with patch('src.transform.pdf_status.page_evidence', side_effect=RuntimeError('failed')):
+            rows = audit(self.path)
+        self.assertEqual(rows[0]['Status'], 'WARNING')
+        self.assertEqual(next(r['Status'] for r in rows if r['Check'] == 'Image overlays'), 'WARNING')
+
+    def test_revision_limit_is_explicit(self):
+        create_pdf(self.path)
+        for title in ('copy1', 'copy2'):
+            with fitz.open(self.path) as doc:
+                doc.set_metadata({'title': title})
+                doc.saveIncr()
+        with patch('src.transform.pdf_status.MAX_REVISION_CANDIDATES', 1):
+            rows = audit(self.path)
+        self.assertEqual(rows[0]['Status'], 'WARNING')
+        self.assertIn('limit reached', rows[0]['Details'])
+
+    def test_first_page_failure_does_not_skip_forensics(self):
+        create_pdf(self.path)
+        with patch('src.transform.pdf_status.read_first_page', side_effect=RuntimeError('failed')):
+            rows = inspect_pdf(self.path)
+        self.assertEqual(rows[0]['Status'], 'WARNING')
+        self.assertTrue(any(r['Check'] == 'Text overlays and cover-ups' for r in rows))
+
+    def signature_fixture(self, byte_range=None):
+        create_pdf(self.path)
+        path = self.path.with_name('signature.pdf')
+        with fitz.open(self.path) as doc:
+            xref = doc.get_new_xref()
+            doc.update_object(xref, '<< /Type /Sig /Contents <30820000> /ByteRange '
+                              '[0 1111111111 2222222222 3333333333] >>')
+            doc.xref_set_key(doc.pdf_catalog(), 'TestSignature', f'{xref} 0 R')
+            doc.save(path)
+        raw = path.read_bytes()
+        start = raw.index(b'<30820000>')
+        end = start + len(b'<30820000>')
+        values = byte_range or f'[0 {start:010d} {end:010d} {len(raw) - end:010d}]'
+        old = b'[0 1111111111 2222222222 3333333333]'
+        self.assertEqual(len(values), len(old))
+        self.assertIn(old, raw)
+        path.write_bytes(raw.replace(old, values.encode('ascii')))
+        return path
+
+    def test_unverified_signature_does_not_make_overall_pass(self):
+        rows = audit(self.signature_fixture())
+        self.assertEqual(rows[0]['Status'], 'WARNING')
+        self.assertIn('cryptographic verification', rows[0]['Details'])
+        evidence = next(r for r in rows if r['Check'] == 'Digital signature')
+        self.assertIn('structural range valid', evidence['Details'])
+
+    def test_signature_decimal_range_is_invalid(self):
+        rows = audit(self.signature_fixture('[0 111111.111 2222222222 3333333333]'))
+        evidence = next(r for r in rows if r['Check'] == 'Digital signature')
+        self.assertIn('structural range invalid', evidence['Details'])
+
+    def test_signed_revision_trailing_bytes_are_reported(self):
+        path = self.signature_fixture()
+        with fitz.open(path) as doc:
+            doc.set_metadata({'title': 'later save'})
+            doc.saveIncr()
+        rows = audit(path)
+        self.assertIn('bytes after a signed revision', rows[0]['Details'])
+
+    def test_image_coverup_on_later_page_after_full_rewrite(self):
+        def modify(doc):
+            page = doc.new_page()
+            page.insert_text((40, 215), 'Payment 100.00', fontsize=10)
+            page.insert_image(fitz.Rect(38, 202, 330, 220), stream=self.image_bytes(), keep_proportion=False)
+        rows = audit(self.save_rewrite(modify))
+        evidence = next(r for r in rows if r['Check'] == 'Image overlays')
+        self.assertEqual(evidence['Status'], 'WARNING')
+        self.assertIn('Page 2', evidence['Details'])
+
+    def test_image_only_revision_change_is_confirmed(self):
+        create_pdf(self.path)
+        with fitz.open(self.path) as doc:
+            doc[0].draw_rect(fitz.Rect(400, 400, 450, 450), fill=(0, 0, 0))
+            doc.saveIncr()
+        rows = audit(self.path)
+        self.assertEqual(rows[0]['Status'], 'FAIL')
+        self.assertIn('appearance changed', next(r['Details'] for r in rows if r['Check'] == 'Saved revision content comparison'))
+
+    def test_zero_signature_placeholder_is_not_valid(self):
+        path = self.signature_fixture()
+        path.write_bytes(path.read_bytes().replace(b'<30820000>', b'<00000000>'))
+        rows = audit(path)
+        self.assertIn('structural range invalid', next(r['Details'] for r in rows if r['Check'] == 'Digital signature'))
+
+    def test_signature_without_byte_range_is_reported(self):
+        def modify(doc):
+            xref = doc.get_new_xref()
+            doc.update_object(xref, '<< /Type /Sig /Contents <30820000> >>')
+            doc.xref_set_key(doc.pdf_catalog(), 'TestSignature', f'{xref} 0 R')
+        rows = audit(self.save_rewrite(modify))
+        self.assertEqual(rows[0]['Status'], 'WARNING')
+        self.assertIn('structural range invalid', next(r['Details'] for r in rows if r['Check'] == 'Digital signature'))
+
+    def test_new_evidence_reaches_final_sheet(self):
+        path = self.save_rewrite(lambda doc: doc[0].insert_image(
+            fitz.Rect(38, 202, 330, 220), stream=self.image_bytes(), keep_proportion=False))
+        frame = builder._build_pdf_status_sheet([path])
+        self.assertEqual(list(frame.columns), builder.PDF_STATUS_COLUMNS)
+        self.assertEqual(frame.loc[frame['Check'] == 'Image overlays', 'Status'].iloc[0], 'WARNING')
 
     def test_style_does_not_modify_other_sheet(self):
         book = Workbook()

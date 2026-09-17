@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import logging
-import sys
 import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CODE_ROOT = str(PROJECT_ROOT / "src" / "code")
-sys.path.insert(0, CODE_ROOT)
 
-import bank_detector
-import iob_parser
+from src.parsers import detector as bank_detector
+from src.parsers import iob_parser
 
 SAMPLE_PDF = PROJECT_ROOT / "input" / "AKILANMANIVANNAN.pdf"
 NEW_LAYOUT_SAMPLE_PDF = PROJECT_ROOT / "input" / "IOI.pdf"

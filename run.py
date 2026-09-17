@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -81,17 +80,16 @@ def _maybe_reexec_into_venv(project_root: Path) -> None:
 def main() -> None:
     project_root = Path(__file__).resolve().parent
     _maybe_reexec_into_venv(project_root)
-    src_dir = project_root / "src"
-    code_dir = project_root / "src" / "code"
-    sys.path.insert(0, str(code_dir))
-    sys.path.insert(1, str(src_dir))
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
     try:
-        runpy.run_path(str(code_dir / "run.py"), run_name="__main__")
+        from src.main import main as run_pipeline
+        raise SystemExit(run_pipeline())
     except ModuleNotFoundError as exc:
         missing_module = getattr(exc, "name", None) or "a required dependency"
         print(f"Missing Python dependency: {missing_module}")
         print("Install or repair the project virtualenv first:")
-        print(r"  .\install_fresh_machine.bat")
+        print(r"  .\install_new_machine.bat")
         print("If you prefer manual setup:")
         print(r"  py -3 -m venv .venv")
         print(r"  .\.venv\Scripts\python.exe -m pip install --upgrade pip")

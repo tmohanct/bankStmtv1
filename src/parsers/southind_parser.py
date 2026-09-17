@@ -8,11 +8,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-
 import fitz
 import pandas as pd
+from src.parsers.base_parser import BaseStatementParser
 
-from parsers.base_parser import BaseStatementParser
 
 TRANSACTION_DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{2}$")
 SLNO_LAYOUT_DATE_RE = re.compile(r"^\d{2}-[A-Za-z]{3}-\d{4}$")
@@ -515,3 +514,10 @@ class SouthIndianParser(BaseStatementParser):
 
 # PDF_Status only. Transaction parsing does not use this profile.
 PDF_STATUS_PROFILE = {'name': 'South Indian Bank', 'ifsc': 'SIBL', 'aliases': ['South Indian Bank'], 'unlabelled_left': True}
+
+def parse(pdf_path: str, logger, progress_cb=None):
+    return parse_southind_records(pdf_path=pdf_path, logger=logger, progress_cb=progress_cb)
+
+
+BANK_CODE = 'southind'
+BANK_SIGNATURES = (('SOUTH INDIAN BANK', 4), ('SIBL', 3), ('STATEMENT OF ACCOUNT', 1))

@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-from final_excel_builder import (
+from src.export.final_excel_builder import (
     INDIAN_NUMBER_FORMAT_NO_DECIMAL,
     MONTH_LABEL_FILL,
     MONTH_DR_CR_FOOTNOTE,
     _apply_month_dr_cr_style,
+)
+from src.transform.analysis import (
     _build_month_dr_cr_sheet,
+)
+from src.export.monthly_chart import (
     _format_month_dr_cr_chart_label,
 )
 
@@ -130,23 +130,24 @@ class MonthDrCrSheetTests(unittest.TestCase):
         for row in dataframe_to_rows(df, index=False, header=True):
             ws.append(row)
 
-        _apply_month_dr_cr_style(workbook, "month_dr_cr")
+        _apply_month_dr_cr_style(workbook, "month_dr_cr", "Sample Customer")
 
-        self.assertEqual(ws["A2"].fill.fgColor.rgb, MONTH_LABEL_FILL.fgColor.rgb)
         self.assertEqual(ws["A3"].fill.fgColor.rgb, MONTH_LABEL_FILL.fgColor.rgb)
-        self.assertNotEqual(ws["B2"].fill.fgColor.rgb, ws["B3"].fill.fgColor.rgb)
-        self.assertNotEqual(ws["A2"].fill.fgColor.rgb, ws["B2"].fill.fgColor.rgb)
-        self.assertEqual(ws["A4"].value, "Total")
-        self.assertTrue(pd.isna(ws["E4"].value) or ws["E4"].value == "")
-        self.assertEqual(ws["I4"].value, 11500.0)
-        self.assertEqual(ws["E2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
-        self.assertEqual(ws["H2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
-        self.assertEqual(ws["I2"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
-        self.assertEqual(ws["A6"].value, MONTH_DR_CR_FOOTNOTE)
+        self.assertEqual(ws["A1"].value, "Sample Customer")
+        self.assertEqual(ws["A4"].fill.fgColor.rgb, MONTH_LABEL_FILL.fgColor.rgb)
+        self.assertNotEqual(ws["B3"].fill.fgColor.rgb, ws["B4"].fill.fgColor.rgb)
+        self.assertNotEqual(ws["A3"].fill.fgColor.rgb, ws["B3"].fill.fgColor.rgb)
+        self.assertEqual(ws["A5"].value, "Total")
+        self.assertTrue(pd.isna(ws["E5"].value) or ws["E5"].value == "")
+        self.assertEqual(ws["I5"].value, 11500.0)
+        self.assertEqual(ws["E3"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
+        self.assertEqual(ws["H3"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
+        self.assertEqual(ws["I3"].number_format, INDIAN_NUMBER_FORMAT_NO_DECIMAL)
+        self.assertEqual(ws["A7"].value, MONTH_DR_CR_FOOTNOTE)
         self.assertEqual(len(ws._charts), 0)
         self.assertEqual(len(ws._images), 1)
-        self.assertEqual(ws._images[0].anchor, "A11")
-        self.assertEqual(ws.auto_filter.ref, "A1:I4")
+        self.assertEqual(ws._images[0].anchor, "A12")
+        self.assertEqual(ws.auto_filter.ref, "A2:I5")
         self.assertEqual(ws.column_dimensions["A"].width, 12)
         self.assertEqual(ws.column_dimensions["B"].width, 16)
         self.assertEqual(ws.column_dimensions["C"].width, 16)

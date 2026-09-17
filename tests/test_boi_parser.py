@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import logging
-import sys
 import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-import bank_detector
-import boi_parser
+from src.parsers import detector as bank_detector
+from src.parsers import boi_parser
 
 SAMPLE_PDF = PROJECT_ROOT / "input" / "IndianBank.pdf"
 

@@ -7,11 +7,10 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-
 import pandas as pd
 import pdfplumber
+from src.parsers.base_parser import BaseStatementParser
 
-from parsers.base_parser import BaseStatementParser
 
 DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{4}$")
 
@@ -245,3 +244,10 @@ class UnionBankParser(BaseStatementParser):
 
 # PDF_Status only. Transaction parsing does not use this profile.
 PDF_STATUS_PROFILE = {'name': 'Union Bank of India', 'ifsc': 'UBIN', 'aliases': ['Union Bank of India', 'Union Bank'], 'name_after': 'Statement of Account'}
+
+def parse(pdf_path: str, logger, progress_cb=None):
+    return parse_unionbank_records(pdf_path=pdf_path, logger=logger, progress_cb=progress_cb)
+
+
+BANK_CODE = 'unionbank'
+BANK_SIGNATURES = (('UNION BANK', 4), ('UBIN', 3), ('TRANSACTION ID', 1))

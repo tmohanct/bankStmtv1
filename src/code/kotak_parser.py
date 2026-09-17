@@ -1,7 +1,10 @@
-from __future__ import annotations
+"""Compatibility import; implementation lives in src.parsers.kotak_parser."""
+import sys
+from pathlib import Path
 
-from parsers.kotak_parser import parse_kotak_records
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from src.parsers import kotak_parser as _implementation
 
-
-def parse(pdf_path: str, logger, progress_cb=None):
-    return parse_kotak_records(pdf_path=pdf_path, logger=logger, progress_cb=progress_cb)
+sys.modules[__name__] = _implementation

@@ -30,7 +30,7 @@ function Copy-FilteredTree {
             continue
         }
 
-        if ($entry.Extension -in @('.pyc', '.pyo')) {
+        if ($entry.Extension -in @('.pyc', '.pyo', '.bak')) {
             continue
         }
 
@@ -62,10 +62,13 @@ $rootFiles = @(
     'SETUP_WINDOWS.md',
     'requirements.txt',
     'run.py',
+    'stmt.bat',
+    'build_fresh_machine_package.py',
+    'build_fresh_machine_package.bat',
     'run_bank_parser.bat',
     'setup_windows.bat',
     'setup_windows.ps1',
-    'install_fresh_machine.bat'
+    'install_new_machine.bat'
 )
 
 foreach ($file in $rootFiles) {

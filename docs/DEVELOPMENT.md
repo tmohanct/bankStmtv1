@@ -61,9 +61,9 @@ winget install --id UB-Mannheim.TesseractOCR -e --accept-package-agreements --ac
 ├── build_windows_package.ps1      Alternate package builder
 ├── input/                         Rules.xlsx and conventional PDFs
 ├── output/                        Generated workbooks/temp data
-├── src/code/                      Active CLI, parsers, helpers, builder
-├── src/parsers/                   Modular/shared parsers
-├── src/transform/, export/, utils/ Scaffold pipeline components
+├── src/code/                      Compatibility imports only
+├── src/parsers/                   Canonical bank parsers and registry
+├── src/transform/, export/, utils/ Canonical pipeline components
 ├── src/logs/                      Active logs
 └── tests/                         unittest suite
 ```
@@ -73,13 +73,19 @@ winget install --id UB-Mannheim.TesseractOCR -e --accept-package-agreements --ac
 | Module | Responsibility |
 |---|---|
 | `run.py` | `.venv` detection/re-execution and active launch. |
-| `src/code/run.py` | CLI, active parser map, inputs, passwords, progress, merge, output coordination. |
-| `src/code/bank_detector.py` | Signatures, native extraction, OCR and filename fallbacks. |
-| `src/code/utils.py` | Cleaning, dates, amounts, cheques, generic parsing, paths/decryption, reconciliation. |
-| `src/code/parser_helpers.py` | Shared record, signed-balance, and date helpers. |
-| `src/code/final_excel_builder.py` | Rules, analysis sheets, PDF status, styles, chart, naming. |
-| `src/code/*_parser.py` | Active bank adapters/implementations. |
-| `src/parsers/*_parser.py` | Class parsers and record parsers reused by adapters. |
+| `src/main.py` | CLI, active parser map, inputs, passwords, progress, merge, output coordination. |
+| `src/parsers/detector.py` | Signatures, native extraction, OCR and filename fallbacks. |
+| `src/utils/statement_utils.py` | Dates, amounts, generic parsing and paths/decryption. |
+| `src/utils/text_utils.py` | Shared text cleaning. |
+| `src/utils/ocr.py` | Shared Tesseract executable discovery. |
+| `src/transform/normalize.py` | Cheque normalization and conservative overlap removal. |
+| `src/transform/validate.py` | Record validation and reconciliation. |
+| `src/export/excel_writer.py` | Intermediate workbook export. |
+| `src/utils/parser_helpers.py` | Shared record, signed-balance, and date helpers. |
+| `src/transform/analysis.py` | Rule matching, transaction filtering, rankings and monthly summaries. |
+| `src/export/monthly_chart.py` | Monthly debit/credit chart image rendering. |
+| `src/export/final_excel_builder.py` | Workbook assembly, PDF status, styles and naming. |
+| `src/parsers/*_parser.py` | Active bank adapters/implementations. |
 
 ## 6. Tests
 
@@ -90,6 +96,8 @@ python -m unittest tests.test_axis_layouts.AxisLayoutTests
 ```
 
 Some regression tests require local representative PDFs and skip when absent. Synthetic unit tests still cover key layout logic.
+
+Tests import canonical `src` packages directly. Run them from the repository root using `python -m unittest`; compatibility entry points are covered separately by the packaging smoke tests. Backup files (`*.bak`) are ignored by Git and both package builders.
 
 Coverage includes Axis layouts/header reuse; bank regressions; cheque normalization; balance consistency; multi-page/wrapped details; rule merging; return/reject filtering; repeat amount ordering; monthly summaries/style; number formatting; PDF summary/status placement; edge-page totals; and negative-balance reporting.
 
@@ -137,7 +145,7 @@ Try `py -3 --version`, then install Python 3.11+ and rerun setup. The setup deli
 .\install_new_machine.bat
 ```
 
-The root launcher's current error text mentions `install_fresh_machine.bat`, but the actual maintained file is `install_new_machine.bat`.
+The root launcher recommends the maintained `install_new_machine.bat`. Batch wrappers also fall back from stale virtual environments.
 
 ### Input not found
 
@@ -145,7 +153,7 @@ Check spelling/extension, use root `input/`, quote spaces, and single-quote `$` 
 
 ### Auto-detection failed
 
-Use explicit `--bank`. TMB always needs `--bank tmb` until a detector signature is added.
+Use explicit `--bank` when evidence is ambiguous. TMB now supports auto-detection using its name and IFSC prefix.
 
 ### Encrypted PDF failed
 
@@ -157,11 +165,11 @@ Run `tesseract --version`. Set `TESSERACT_CMD` for nonstandard installations and
 
 ### Zero rows
 
-Verify the bank/layout, read the log, check whether the PDF is scanned, and add a regression test before changing code. The process may still build an empty workbook; treat zero rows as a failed business result.
+Verify the bank/layout, read the log, check whether the PDF is scanned, and add a regression test before changing code. Zero rows stop the run with exit code 1 before either workbook is written.
 
 ### Reconciliation mismatch
 
-Review page boundaries, wrapped rows, summary rows, missing pages, debit/credit direction, OCR decimals, and what the printed totals include.
+A mismatch against extracted summary totals stops generation with exit code 1. Review page boundaries, wrapped rows, summary rows, missing pages, debit/credit direction, OCR decimals, and what the printed totals include. Missing summary totals are reported as unavailable.
 
 ### Rules do not create a sheet
 
@@ -185,12 +193,12 @@ Use `.\setup_windows.bat`; it invokes the setup script with execution-policy byp
 - `PDF_Status` is heuristic, not forensic proof.
 - Validate transactions against originals before decisions.
 
-## 11. Known maintenance notes
+## 11. Maintenance notes
 
-- Active CLI and `src/main.py` scaffold coexist with different schemas/bank lists.
-- TMB parsing is active but TMB detection is missing.
-- Intermediate output is overwritten.
-- Final money styling rounds displayed values to whole numbers.
-- Timestamp collision handling has no same-second counter.
-- Recommended Python and alternate PowerShell packagers both exist; prefer and test the recommended path.
-
+- All launchers use `src/main.py` and one discovered parser registry.
+- `src/code/` is compatibility-only; change canonical modules instead.
+- Intermediate `output.xlsx` is overwritten as required by the project contract.
+- Final money values retain decimals even when displayed as whole units.
+- Existing timestamped final names receive a numeric collision suffix.
+- Cross-file deduplication requires a known account and adjacent sequence overlap; unknown identities and lone matches remain intact.
+- The full test suite includes isolated packaging, import, validation, precision and collision regressions.

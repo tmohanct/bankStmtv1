@@ -3,16 +3,11 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
-import sys
 import unittest
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-from parsers.southind_parser import _PendingRecord, _WordLine, _parse_amount, _parse_slno_layout_lines
-from run import collect_negative_balance_rows, report_negative_balance_rows
+from src.parsers.southind_parser import _PendingRecord, _WordLine, _parse_amount, _parse_slno_layout_lines
+from src.main import collect_negative_balance_rows, report_negative_balance_rows
 
 
 class SouthIndRegressionTests(unittest.TestCase):

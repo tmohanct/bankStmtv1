@@ -6,12 +6,12 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
-
 import pandas as pd
 import pdfplumber
-
-from parsers.base_parser import BaseStatementParser
+from src.parsers.base_parser import BaseStatementParser
 from src.utils.amount_utils import parse_amount
+from src.utils.parser_helpers import build_record
+
 
 ACCOUNT_NUMBER_RE = re.compile(
     r"(?:Account\s+(?:No|Number)|A\s*/\s*C\s*(?:No|Number))\s*[:\-]\s*([0-9A-Za-z]+)",
@@ -224,3 +224,34 @@ class IOBParser(BaseStatementParser):
 
 # PDF_Status only. Transaction parsing does not use this profile.
 PDF_STATUS_PROFILE = {'name': 'Indian Overseas Bank', 'ifsc': 'IOBA', 'aliases': ['Indian Overseas Bank'], 'header_pattern': '\\bTYPE\\s*:\\s*IOB\\b', 'account_name_tail': True, 'name_after': 'A/C NO'}
+
+
+DATE_FORMATS = ("%d/%m/%Y",)
+
+
+def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, object]]:
+    logger.info("Parsing IOB statement: %s", pdf_path)
+
+    normalized_rows = parse_iob_records(pdf_path, progress_cb=progress_cb)
+    records = [
+        build_record(
+            date_text=str(row.get("Date") or ""),
+            details=str(row.get("Narration") or ""),
+            cheque_no=str(row.get("Txn_Ref") or ""),
+            debit=row.get("Debit"),
+            credit=row.get("Credit"),
+            balance=row.get("Balance"),
+            date_formats=DATE_FORMATS,
+        )
+        for row in normalized_rows
+    ]
+
+    for index, record in enumerate(records, start=1):
+        record["Sno"] = index
+
+    logger.info("IOB parse complete: rows=%s", len(records))
+    return records
+
+
+BANK_CODE = 'iob'
+BANK_SIGNATURES = (('INDIAN OVERSEAS BANK', 4), ('IOBA0', 3), ('IOB FREEDOM CURRENT ACCOUNT', 10))

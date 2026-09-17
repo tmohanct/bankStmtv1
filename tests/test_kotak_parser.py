@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import logging
-import sys
 import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from parsers.kotak_parser import parse_kotak_records
+from src.parsers.kotak_parser import parse_kotak_records
 
 SAMPLE_PDF = PROJECT_ROOT / "input" / "BALASUBRAMANIAN.pdf"
 

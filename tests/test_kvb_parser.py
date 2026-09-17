@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import logging
-import sys
 import unittest
 from unittest.mock import patch
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-import kvb_parser
+from src.parsers import kvb_parser
 
 
 class KVBParserUnitTests(unittest.TestCase):

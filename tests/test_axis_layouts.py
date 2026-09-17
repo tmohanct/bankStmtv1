@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import logging
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-import axis_parser
-from utils import build_output_row, detect_header_map, parse_with_config
+from src.parsers import axis_parser
+from src.utils.statement_utils import build_output_row, detect_header_map, parse_with_config
 
 
 class AxisLayoutTests(unittest.TestCase):
@@ -147,7 +143,7 @@ class AxisLayoutTests(unittest.TestCase):
             ),
         ]
 
-        with patch("utils.extract_pdf_tables", return_value=tables):
+        with patch("src.utils.statement_utils.extract_pdf_tables", return_value=tables):
             records = parse_with_config(
                 pdf_path="dummy.pdf",
                 logger=logger,

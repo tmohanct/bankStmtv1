@@ -8,7 +8,6 @@ from __future__ import annotations
 import importlib
 import re
 import shutil
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
@@ -41,13 +40,10 @@ def clean(value: str) -> str:
 
 @lru_cache(maxsize=1)
 def bank_profiles() -> tuple[dict, ...]:
-    # The legacy CLI puts src/code before src. Keep that order for its imports.
     source = Path(__file__).resolve().parents[1]
-    if str(source) not in sys.path:
-        sys.path.append(str(source))
     profiles = []
     for path in sorted((source / 'parsers').glob('*_parser.py')):
-        module = importlib.import_module('parsers.' + path.stem)
+        module = importlib.import_module('src.parsers.' + path.stem)
         profile = getattr(module, 'PDF_STATUS_PROFILE', None)
         if profile:
             profiles.append(profile)

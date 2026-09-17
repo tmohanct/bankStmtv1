@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-from bank_detector import _detect_from_text
+from src.parsers.detector import _detect_from_text
 
 
 class IciciBankDetectorTests(unittest.TestCase):

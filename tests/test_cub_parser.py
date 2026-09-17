@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import logging
-import sys
 import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-import cub_parser
-from utils import is_date_token, normalize_date
+from src.parsers import cub_parser
+from src.utils.statement_utils import is_date_token, normalize_date
 
 SAMPLE_PDF = PROJECT_ROOT / "input" / "VAIRAKANNU.pdf"
 

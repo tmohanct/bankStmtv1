@@ -7,11 +7,10 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-
 import pandas as pd
 import pdfplumber
+from src.parsers.base_parser import BaseStatementParser
 
-from parsers.base_parser import BaseStatementParser
 
 DATE_RE = re.compile(r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}$")
 
@@ -152,3 +151,10 @@ class KotakParser(BaseStatementParser):
 
 # PDF_Status only. Transaction parsing does not use this profile.
 PDF_STATUS_PROFILE = {'name': 'Kotak Mahindra Bank', 'ifsc': 'KKBK', 'aliases': ['Kotak Mahindra Bank', 'Kotak'], 'name_after': 'Account Statement'}
+
+def parse(pdf_path: str, logger, progress_cb=None):
+    return parse_kotak_records(pdf_path=pdf_path, logger=logger, progress_cb=progress_cb)
+
+
+BANK_CODE = 'kotak'
+BANK_SIGNATURES = (('KOTAK MAHINDRA BANK', 4), ('KKBK', 3), ('CURRENT ACCOUNT TRANSACTIONS', 1))

@@ -10,7 +10,7 @@ python run.py --file statement.pdf
 .\stmt.bat --file statement.pdf
 ```
 
-The `.bat` wrappers are Windows-specific. All forms ultimately run `src/code/run.py`.
+The `.bat` wrappers are Windows-specific. All forms ultimately run `src/main.py`.
 
 ## 2. Syntax
 
@@ -126,7 +126,7 @@ python run.py --file statement.pdf --out customer_july.xlsx
 python run.py --file "jan.pdf;feb.pdf" --out "Customer - Jan-Feb"
 ```
 
-If `output/customer_july.xlsx` exists, the new final workbook becomes `customer_july_YYMMDD_HHMMSS.xlsx`. `src/logs/customer_july.log` is not timestamped and is opened in append mode.
+If `output/customer_july.xlsx` exists, the new final workbook becomes `customer_july_YYMMDD_HHMMSS.xlsx`. `src/logs/customer_july_run_<run-id>.log` records this execution separately.
 
 ## 4. Password in filename
 
@@ -185,15 +185,16 @@ python run.py --file protected.pdf --bank kvb --pwd "password"
 
 The CLI reports file start, selected/detected bank, row progress, a five-second status ticker, per-file row count, workbook-building status, and final paths.
 
-Non-fatal warnings may include negative balances, reconciliation differences, PDF structural/metadata indicators, or unusable rules. On an exception, the CLI prints the error and log path.
+Non-fatal warnings may include negative balances, unavailable summary totals, PDF structural/metadata indicators, or unusable rules. Empty parses, invalid records and mismatched printed totals stop output generation. The CLI prints the error and log path.
 
 ## 7. Exit codes
 
 | Code | Conditions |
 |---:|---|
 | `0` | Help displayed or parsing/workbook creation completed. |
-| `1` | Missing dependency, authentication failure, parser/OCR/Excel error, or another runtime exception. |
+| `1` | Missing dependency, authentication failure, empty/invalid extraction, reconciliation mismatch, parser/OCR/Excel error, or another runtime exception. |
 | `2` | Invalid CLI syntax, unsupported bank, empty file list, missing input, or invalid `--out`. |
+| `130` | Processing interrupted with Ctrl+C. |
 
 Batch wrappers return the Python process exit code.
 
@@ -245,13 +246,14 @@ Output: `dist/bankStmtv1_fresh_windows_YYMMDD_HHMMSS.zip`.
 
 Prefer `build_fresh_machine_package.bat` for the maintained clean-package workflow.
 
-## 10. Alternate scaffold CLI
+## 10. Direct module CLI
 
-`src/main.py` defines a different, smaller CLI:
+`python -m src.main` and `python src/main.py` expose the same full CLI as `python run.py`. `src/main.py` remains a compatibility launcher. The root launcher is preferred because it selects a healthy project virtual environment.
 
-```text
-python src/main.py --bank {axis,boi,iob,kotak,southind,tmb,unionbank} --pdf <filename>
-```
+## 11. Run history and currency
 
-Both arguments are required and `--pdf` is one filename inside root `input/`. It does not expose `--file`, multiple PDFs, `--pwd`, `--out`, or active auto-detection. It is not the recommended runtime command.
+All pipeline runs automatically update the single SQLite `run_history` table, including failures and repeated input files. The default location is `%LOCALAPPDATA%\bankStmtv1\bankstmt.db` on Windows. Set `BANKSTMT_DB_PATH` to override it. `--help` does not create a run.
 
+Optional `--currency INR` confirms that every input uses INR and enables combined totals in paise. Also accepted: USD, EUR, GBP, SGD, AUD and CAD. No conversion is performed. Without this flag, currency and combined monetary totals are NULL; individual PDF totals remain in JSON. For mixed-currency inputs, omit the flag.
+
+Database failures return code 1; initialization failure stops before parsing. See [run history](RUN_HISTORY.md) for the schema, interruption behavior and statistics queries.

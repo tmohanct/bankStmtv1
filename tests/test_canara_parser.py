@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import logging
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-import canara_parser
+from src.parsers import canara_parser
 
 
 class _FakePage:

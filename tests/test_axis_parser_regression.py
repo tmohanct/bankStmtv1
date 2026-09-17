@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import logging
-import sys
 import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-import axis_parser
+from src.parsers import axis_parser
 
 SAMPLE_PDF = PROJECT_ROOT / "input" / "RAJASEKARAN1.pdf"
 

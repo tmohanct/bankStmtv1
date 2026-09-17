@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,10 +11,9 @@ import pandas as pd
 from openpyxl import load_workbook
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-import final_excel_builder
-from utils import OUTPUT_COLUMNS, clean_detail
+from src.export import final_excel_builder
+from src.utils.statement_utils import OUTPUT_COLUMNS, clean_detail
 
 
 ILLEGAL_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")

@@ -16,9 +16,12 @@ SKIP_DIR_NAMES = {
     "tmp_cli",
     "tmp4kxszc32",
 }
-SKIP_FILE_SUFFIXES = {".pyc", ".pyo", ".log"}
+SKIP_FILE_SUFFIXES = {".pyc", ".pyo", ".log", ".bak"}
 ROOT_FILES_TO_INCLUDE = [
     "README.md",
+    "run.py",
+    "stmt.bat",
+    "AGENTS.md",
     "SETUP_WINDOWS.md",
     "requirements.txt",
     "setup_windows.ps1",
@@ -130,6 +133,7 @@ def create_package(repo_root: Path, include_input_pdfs: bool) -> Path:
         copy_tree(repo_root / "src", package_root / "src", include_input_pdfs)
         copy_tree(repo_root / "input", package_root / "input", include_input_pdfs)
         copy_tree(repo_root / "tests", package_root / "tests", include_input_pdfs)
+        copy_tree(repo_root / "docs", package_root / "docs", include_input_pdfs)
         ensure_placeholder_dirs(package_root)
 
         archive_base = dist_dir / package_name

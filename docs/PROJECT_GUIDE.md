@@ -32,7 +32,7 @@ This is the preferred Python entry point. It:
 - Checks for `.venv\Scripts\python.exe`.
 - Ignores a copied/stale virtual environment when `pyvenv.cfg` points to a missing base Python installation.
 - Re-executes itself with the virtual-environment Python when the environment is healthy and the current interpreter is different.
-- Adds `src/code` and `src` to `sys.path` and runs `src/code/run.py`.
+- Imports and runs the canonical `src.main` pipeline.
 - Prints dependency-repair instructions if an import fails.
 
 The internal environment variable `BANKSTMT_SKIP_VENV_REEXEC=1` prevents a re-execution loop. It is set automatically and is not a normal user option.
@@ -41,20 +41,14 @@ The internal environment variable `BANKSTMT_SKIP_VENV_REEXEC=1` prevents a re-ex
 
 These Windows wrappers have equivalent behavior:
 
-1. Use `.venv\Scripts\python.exe` when present.
+1. Use `.venv\Scripts\python.exe` when it passes a health check.
 2. Otherwise try `py -3`.
 3. If the Windows Python launcher is unavailable, try `python`.
-4. Forward all arguments to `src\code\run.py` and return its exit code.
+4. Forward all arguments to the root `run.py` and return its exit code.
 
-### `src/code/run.py`
+### `src/main.py` and compatibility entry point
 
-This is the active application CLI and orchestration layer. Direct execution is supported, although the root `run.py` or batch wrapper is more convenient because the root launcher handles a healthy virtual environment automatically.
-
-### `src/main.py`
-
-`src/main.py` is a separate, earlier modular pipeline scaffold. Its CLI requires `--bank` and `--pdf`, uses `src/parsers/parser_registry.py`, normalizes through `src/transform/`, and exports through `src/export/`. It supports fewer registered banks and is not the command used by the Windows wrappers or current full workbook flow.
-
-The active CLI is defined in `src/code/run.py` and supports multiple files, auto-detection, passwords, and `--out`.
+`src/main.py` is the full CLI and orchestration layer. Direct execution and `python -m src.main` are supported. `src/code/run.py` delegates to the same implementation for compatibility. All forms support multiple files, auto-detection, passwords, and `--out`.
 
 ## 3. End-to-end runtime flow
 
@@ -130,7 +124,7 @@ The merged data is written to `output/output.xlsx`, sheet `Statement`. The final
 | `Balance` | Running account balance after the transaction when available. |
 | `Source` | Original PDF filename. |
 
-The final builder coerces `Debit` and `Credit` to numbers and replaces missing/non-numeric values with `0.0`. Monetary cells in most final sheets are rounded to whole values for display and formatted with Indian digit grouping (`#,##,##0`). The intermediate workbook retains values before final styling.
+The final builder coerces `Debit` and `Credit` to numbers and replaces missing/non-numeric values with `0.0`. Monetary cells retain their original precision in both workbooks. Final sheets use Indian whole-unit display formatting (`#,##,##0`) without replacing the stored values.
 
 ## 5. Shared normalization
 
@@ -157,7 +151,7 @@ Strings beginning with `=` are forced to Excel text cells before saving intermed
 
 ## 6. Logging and errors
 
-Each run writes `src/logs/<output-stem>.log`. It records parser details, reconciliation, rule matches, workbook creation, warnings, and tracebacks. Reusing an output stem appends to the existing log.
+Each run writes `src/logs/<output-stem>_run_<run-id>.log`. It records parser details, reconciliation, rule matches, workbook creation, warnings, and tracebacks. The single SQLite `run_history` table records each execution separately, including failures and reruns. See [run history](RUN_HISTORY.md).
 
 | Code | Meaning |
 |---:|---|
@@ -167,29 +161,22 @@ Each run writes `src/logs/<output-stem>.log`. It records parser details, reconci
 
 ## 7. Architecture
 
-### Active application
+### Canonical modules
 
-- `run.py` — root launcher and virtual-environment handoff.
-- `src/code/run.py` — CLI, active parser map, orchestration, logging, decryption, merge, and output calls.
-- `src/code/bank_detector.py` — bank scoring and OCR fallback.
-- `src/code/utils.py` — cleaning, dates, amounts, cheque normalization, generic table parsing, input/decryption, reconciliation, and intermediate output.
-- `src/code/final_excel_builder.py` — rules, analysis sheets, PDF status, styles, charts, and final naming.
-- `src/code/*_parser.py` — active bank adapters and implementations.
-- `src/parsers/*_parser.py` — modular parsers, some reused by active adapters.
+- `run.py`: root launcher and virtual-environment handoff.
+- `src/main.py`: CLI, validation, merge and output coordination.
+- `src/parsers/`: bank extraction, signatures, detection and one discovered registry.
+- `src/transform/`: normalization, conservative overlap removal, cheque-return classification and validation.
+- `src/export/`: Excel safety, intermediate and analytical workbook output.
+- `src/utils/`: shared parsing, file handling and PDF inspection helpers.
+- `src/code/`: compatibility wrappers only.
 
-### Modular scaffold
-
-- `src/main.py` — alternate minimal pipeline.
-- `src/parsers/base_parser.py`, `parser_registry.py`, and `detector.py` — class interface and smaller registry; scaffold auto-detection is unimplemented.
-- `src/transform/` — alternate normalization/validation.
-- `src/export/` and `src/utils/` — alternate export/helpers.
-
-The active application uses `Sno`, `Date`, and `Details`; the scaffold targets fields such as `Txn_Date`, `Value_Date`, `Description`, `Bank`, and `Account_Number`. They are not interchangeable.
+All launchers use the same transaction schema and registry. Older class parser APIs remain compatibility interfaces; they are not a second CLI pipeline.
 
 ## 8. Reliability boundaries
 
 - Extraction is layout-sensitive; bank template changes can require parser updates.
-- Auto-detection selects the highest weighted match and has no confidence threshold beyond at least one match.
+- Auto-detection requires a distinctive signature and rejects tied evidence; generic statement headings alone do not select a bank.
 - Reconciliation requires recognizable summary text.
 - Negative balances may be legitimate overdrafts.
 - `PDF_Status` is heuristic and does not cryptographically validate signatures.

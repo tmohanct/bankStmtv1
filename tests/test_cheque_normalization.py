@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-from parser_helpers import build_record
-from utils import extract_cheque_number_from_details, normalize_cheque_number, records_to_dataframe
+from src.utils.parser_helpers import build_record
+from src.transform.normalize import extract_cheque_number_from_details, normalize_cheque_number, records_to_dataframe
 
 
 class ChequeNormalizationTests(unittest.TestCase):

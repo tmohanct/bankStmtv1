@@ -2,7 +2,7 @@
 
 ## 1. Active bank map
 
-The active `PARSERS` dictionary is in `src/code/run.py` and exposes 23 codes.
+The active registry in `src/parsers/parser_registry.py` discovers all 24 bank modules by `BANK_CODE` and `parse()`.
 
 | Code | Bank | Main extraction approach |
 |---|---|---|
@@ -35,11 +35,11 @@ This describes known implementations, not every PDF a bank may issue.
 
 ## 2. Automatic bank detection
 
-When `--bank` is omitted, `src/code/bank_detector.py` performs three stages.
+When `--bank` is omitted, `src/parsers/detector.py` performs three stages.
 
 ### Stage 1: native text
 
-It concatenates the first two pages using both `pdfplumber` and PyMuPDF, uppercases text, collapses whitespace, and scores weighted signatures. The highest `(score, bank_code)` wins; a score tie is therefore broken by the lexically larger code.
+It concatenates the first two pages using both `pdfplumber` and PyMuPDF, uppercases text, collapses whitespace, and scores weighted signatures. A distinctive bank signature is required. Generic headings alone and score ties do not select a bank. Names contained in a more specific bank name are not counted as independent evidence.
 
 ### Stage 2: OCR
 
@@ -74,7 +74,7 @@ If content and OCR fail, the filename stem is scored. A filename match is logged
 | `icici` | `ICICI BANK`, `ICIC0` |
 | `idbi` | `IDBI BANK`, `IBKL0` |
 | `idfc` | `IDFC FIRST BANK`, `IDFB0` |
-| `indian` | `IDIB0`, `ACCOUNT STATEMENT`, `ACCOUNT ACTIVITY` |
+| `indian` | `INDIAN BANK`, `IDIB0` |
 | `indus` | `INDUSIND BANK`, `INDB0` |
 | `iob` | `INDIAN OVERSEAS BANK`, `IOBA0` |
 | `kvb` | `KARUR VYSYA BANK`, `KVBL0` |
@@ -82,13 +82,14 @@ If content and OCR fail, the filename stem is scored. A filename match is logged
 | `pnb` | `PUNJAB NATIONAL BANK`, `PUNB0` |
 | `sbi` | `STATE BANK OF INDIA`, `SBIN0` |
 | `southind` | `SOUTH INDIAN BANK`, `SIBL` |
+| `tmb` | `TAMILNAD MERCANTILE BANK`, `TMBL0` |
 | `unionbank` | `UNION BANK`, `UBIN` |
 
-`tmb` has an active parser but no `BANK_SIGNATURES` entry. Automatic detection cannot select it; use `--bank tmb`.
+TMB supports auto-detection using its bank name and TMBL IFSC prefix. Generic headings and tied evidence are rejected.
 
 ## 3. Generic table parser
 
-Axis and DBS use the shared configurable parser in `src/code/utils.py`:
+Axis and DBS use the shared configurable parser in `src/utils/statement_utils.py`:
 
 1. Extract all tables with `pdfplumber`.
 2. Normalize whitespace.
@@ -151,10 +152,10 @@ The runner sets `Source` and regenerates `Sno` across merged inputs.
 ## 6. Add a new bank
 
 1. Create `src/parsers/<code>_parser.py` per repository instructions.
-2. If necessary, expose a thin `src/code/<code>_parser.py` adapter with `parse()`.
+2. Expose `parse(pdf_path, logger, progress_cb=None)` returning the common records.
 3. Reuse shared helpers where appropriate.
-4. Import it in `src/code/run.py` and add it to `PARSERS`.
-5. Add weighted `BANK_SIGNATURES` if auto-detection should support it.
+4. Define `BANK_CODE` in the module; the registry discovers it automatically.
+5. Define weighted `BANK_SIGNATURES` in the same module, using distinctive bank identity evidence.
 6. Add focused synthetic layout tests and representative PDF regression tests.
 7. Test CLI help, explicit parsing, detection, output columns, balance continuity, multi-page rows, and final workbook creation.
 8. Update documentation bank lists.
@@ -168,9 +169,6 @@ The runner sets `Source` and regenerates `Sno` across merged inputs.
 - Log the selected path.
 - Add tests for new and old layouts.
 
-## 8. Modular registry versus active map
+## 8. Shared registry
 
-The scaffold registry in `src/parsers/parser_registry.py` contains `axis`, `boi`, `esfb`, `iob`, `kotak`, `southind`, `tmb`, and `unionbank`. It belongs to `src/main.py`.
-
-The user-facing CLI uses the 23-entry `PARSERS` map in `src/code/run.py`. Use that map when determining command support. Equitas accepts either `--bank esfb` or the `--bank equitas` alias.
-
+Every launcher uses `src/parsers/parser_registry.py`. There is no separate bank map in the CLI. Equitas accepts `--bank esfb` or `--bank equitas`. Old `src/code/` imports delegate to the canonical modules.

@@ -8,11 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-
 import fitz
 import pandas as pd
+from src.parsers.base_parser import BaseStatementParser
 
-from parsers.base_parser import BaseStatementParser
 
 DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{4}$")
 DATE_FORMATS = ("%d-%m-%Y",)
@@ -298,3 +297,13 @@ class BOIParser(BaseStatementParser):
 
 # PDF_Status only. Transaction parsing does not use this profile.
 PDF_STATUS_PROFILE = {'name': 'Bank of India', 'ifsc': 'BKID', 'aliases': ['Bank of India']}
+
+def parse(pdf_path: str, logger, progress_cb=None):
+    return parse_boi_records(pdf_path=pdf_path, logger=logger, progress_cb=progress_cb)
+
+
+__all__ = ["parse"]
+
+
+BANK_CODE = 'boi'
+BANK_SIGNATURES = (('IFSC CODE : BKID', 7), ('BANK OF INDIA', 5), ('BKID0', 3))

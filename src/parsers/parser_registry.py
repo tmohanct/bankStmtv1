@@ -1,45 +1,39 @@
-"""Central parser registry for all bank statement parsers."""
-
-from __future__ import annotations
-
+"""Discover bank parsers once; all entry points use this registry."""
+from importlib import import_module
+from pathlib import Path
 from typing import Callable
 
-from parsers.axis_parser import AxisParser
-from parsers.base_parser import BaseStatementParser
-from parsers.boi_parser import BOIParser
-from parsers.esfb_parser import ESFBParser
-from parsers.iob_parser import IOBParser
-from parsers.kotak_parser import KotakParser
-from parsers.southind_parser import SouthIndianParser
-from parsers.tmb_parser import TMBParser
-from parsers.unionbank_parser import UnionBankParser
 
-ParserFactory = Callable[[], BaseStatementParser]
+def _modules():
+    for path in sorted(Path(__file__).parent.glob("*_parser.py")):
+        module = import_module(f"src.parsers.{path.stem}")
+        if getattr(module, "BANK_CODE", None) and callable(getattr(module, "parse", None)):
+            yield module
 
-PARSER_REGISTRY: dict[str, ParserFactory] = {
-    "axis": AxisParser,
-    "boi": BOIParser,
-    "esfb": ESFBParser,
-    "iob": IOBParser,
-    "kotak": KotakParser,
-    "southind": SouthIndianParser,
-    "tmb": TMBParser,
-    "unionbank": UnionBankParser,
-}
+
+_BANK_MODULES = tuple(_modules())
+PARSER_REGISTRY = {module.BANK_CODE: module.parse for module in _BANK_MODULES}
+
+
+def bank_signatures():
+    return {module.BANK_CODE: module.BANK_SIGNATURES for module in _BANK_MODULES}
 
 
 def list_supported_banks() -> list[str]:
-    return sorted(PARSER_REGISTRY.keys())
+    return sorted(PARSER_REGISTRY)
 
 
-def get_parser_factory(bank_code: str) -> ParserFactory | None:
-    return PARSER_REGISTRY.get(bank_code.strip().lower())
+def get_parser(bank_code: str) -> Callable:
+    try:
+        return PARSER_REGISTRY[bank_code.strip().lower()]
+    except KeyError:
+        raise ValueError(f"Unsupported bank '{bank_code}'. Supported banks: {', '.join(list_supported_banks())}") from None
 
 
-def register_parser(bank_code: str, parser_factory: ParserFactory) -> None:
-    normalized_code = bank_code.strip().lower()
-    if not normalized_code:
-        raise ValueError("bank_code must not be empty")
-
-    # TODO: Add collision policy if dynamic plugin loading is introduced.
-    PARSER_REGISTRY[normalized_code] = parser_factory
+def register_parser(bank_code: str, parser: Callable) -> None:
+    code = bank_code.strip().lower()
+    if not code or not callable(parser):
+        raise ValueError("A bank code and callable parser are required")
+    if code in PARSER_REGISTRY:
+        raise ValueError(f"Parser already registered: {code}")
+    PARSER_REGISTRY[code] = parser

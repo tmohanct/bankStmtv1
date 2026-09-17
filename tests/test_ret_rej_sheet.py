@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import logging
-import shutil
-import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 import pandas as pd
 from openpyxl import load_workbook
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-from final_excel_builder import _build_repeat_sheet, _build_return_reject_sheet, _extract_known_bank_name, build_final_workbook
-from utils import OUTPUT_COLUMNS, clean_detail
+from src.transform.analysis import (
+    _build_repeat_sheet,
+    _build_return_reject_sheet,
+)
+from src.export.final_excel_builder import (
+    build_final_workbook,
+)
+from src.utils.statement_utils import OUTPUT_COLUMNS, clean_detail
+from src.utils.pdf_status_reader import Header, identify_bank, positioned_rows
 
 
 def _statement_frame() -> pd.DataFrame:
@@ -78,10 +82,12 @@ def _statement_frame() -> pd.DataFrame:
 
 
 class PdfAccountSummaryTests(unittest.TestCase):
-    def test_indian_statement_title_does_not_become_bank_name(self) -> None:
-        bank_name = _extract_known_bank_name(["ACCOUNT STATEMENT"], PROJECT_ROOT / "input" / "ivlIndian.pdf")
+    def test_statement_title_does_not_become_bank_name(self) -> None:
+        header = Header(positioned_rows([(0, 0, 160, 12, "ACCOUNT STATEMENT")]), width=600)
+        profile, evidence = identify_bank(header)
 
-        self.assertEqual(bank_name, "Indian Bank")
+        self.assertEqual(profile, {})
+        self.assertEqual(evidence, "")
 
 class RepeatAmountSheetTests(unittest.TestCase):
     def test_same_amount_sorts_by_cheque_then_date_when_cheque_missing(self) -> None:
@@ -103,23 +109,20 @@ class ReturnRejectSheetTests(unittest.TestCase):
     def test_build_return_reject_sheet_keeps_only_related_rows(self) -> None:
         result = _build_return_reject_sheet(_statement_frame())
 
-        self.assertListEqual(result["Sno"].tolist(), [2, 3, 4, 5])
+        self.assertListEqual(result["Sno"].tolist(), [2, 5])
         self.assertListEqual(
             result["Source"].tolist(),
-            ["axis.pdf", "axis2.pdf", "hdfc.pdf", "indus.pdf"],
+            ["axis.pdf", "indus.pdf"],
         )
 
-    def test_final_workbook_writes_ret_rej_as_second_sheet(self) -> None:
+    def test_final_workbook_writes_cheque_only_ret_rej_after_statement(self) -> None:
         statement_df = _statement_frame()
         logger = logging.getLogger("tests.ret_rej_sheet")
         logger.handlers.clear()
         logger.addHandler(logging.NullHandler())
 
-        temp_root = PROJECT_ROOT / "output" / "_ret_rej_sheet_test"
-        shutil.rmtree(temp_root, ignore_errors=True)
-        temp_root.mkdir(parents=True, exist_ok=True)
-
-        try:
+        with tempfile.TemporaryDirectory(prefix="ret_rej_") as temp_directory:
+            temp_root = Path(temp_directory)
             rules_path = temp_root / "Rules.xlsx"
             output_dir = temp_root / "output"
             pd.DataFrame(columns=["Category", "subCategory", "SheetName"]).to_excel(rules_path, index=False)
@@ -142,9 +145,9 @@ class ReturnRejectSheetTests(unittest.TestCase):
             workbook.close()
 
             ret_rej_df = pd.read_excel(final_path, sheet_name="Ret_Rej")
-            self.assertListEqual(ret_rej_df["Sno"].tolist(), [2, 3, 4, 5])
-        finally:
-            shutil.rmtree(temp_root, ignore_errors=True)
+            self.assertListEqual(ret_rej_df["Sno"].tolist(), [2, 5])
+            exported_statement = pd.read_excel(final_path, sheet_name="Statement")
+            self.assertEqual(exported_statement["Sno"].tolist(), [1, 2, 3, 4, 5])
 
 
 if __name__ == "__main__":

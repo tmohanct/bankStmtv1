@@ -3,14 +3,18 @@ setlocal
 set "ROOT=%~dp0"
 set "VENV_PY=%ROOT%.venv\Scripts\python.exe"
 
-if exist "%VENV_PY%" (
-    "%VENV_PY%" "%ROOT%src\code\run.py" %*
-    exit /b %errorlevel%
-)
+if not exist "%VENV_PY%" goto system_python
+"%VENV_PY%" --version >nul 2>nul
+if errorlevel 1 goto system_python
+"%VENV_PY%" "%ROOT%run.py" %*
+exit /b %errorlevel%
 
-py -3 "%ROOT%src\code\run.py" %* 2>nul
-set "EXITCODE=%errorlevel%"
-if not "%EXITCODE%"=="9009" exit /b %EXITCODE%
+:system_python
+py -3 --version >nul 2>nul
+if errorlevel 1 goto path_python
+py -3 "%ROOT%run.py" %*
+exit /b %errorlevel%
 
-python "%ROOT%src\code\run.py" %*
+:path_python
+python "%ROOT%run.py" %*
 exit /b %errorlevel%

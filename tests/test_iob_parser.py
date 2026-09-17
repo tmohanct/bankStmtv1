@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import sys
 import unittest
 from pathlib import Path
 
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from parsers.iob_parser import IOBParser
-from parsers.parser_registry import list_supported_banks
+from src.parsers.iob_parser import IOBParser
+from src.parsers.parser_registry import list_supported_banks
 
 SAMPLE_PDF = PROJECT_ROOT / "input" / "AKILANMANIVANNAN.pdf"
 NEW_LAYOUT_SAMPLE_PDF = PROJECT_ROOT / "input" / "IOI.pdf"

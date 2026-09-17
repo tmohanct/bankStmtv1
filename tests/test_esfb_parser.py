@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 import logging
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "src" / "code"))
 
-import esfb_parser
-import run
-from bank_detector import _detect_from_text
-from parsers import esfb_parser as esfb_parser_impl
+from src.parsers import esfb_parser
+from src import main as run
+from src.parsers.detector import _detect_from_text
+from src.parsers import esfb_parser as esfb_parser_impl
 
 
 class _FakePage:
