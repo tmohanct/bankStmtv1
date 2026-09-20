@@ -10,6 +10,7 @@ import pytesseract
 from PIL import Image
 
 from src.utils.ocr import find_tesseract, record_ocr_use
+from src.utils.pdf_status_reader import read_first_page
 from src.parsers.parser_registry import bank_signatures
 
 BANK_SIGNATURES = bank_signatures()
@@ -105,6 +106,19 @@ def _detect_from_text(text: str) -> str | None:
 
 
 def detect_bank_from_pdf(pdf_path: Path, logger) -> str:
+    # A bank mentioned in transaction narration is not the statement issuer.
+    # Read the first-page identity (including image logos) before scoring the
+    # full text. Avoid OCR when the native header already identifies the bank.
+    for allow_ocr in (False, True):
+        first_page = read_first_page(pdf_path, allow_ocr=allow_ocr)
+        bank_code = _detect_from_text(first_page.values.get("Bank Name", ""))
+        if bank_code:
+            logger.info(
+                "Auto-detected bank '%s' from first-page identity for %s (%s)",
+                bank_code, pdf_path.name, first_page.sources.get("Bank Name", ""),
+            )
+            return bank_code
+
     extracted_text = "\n".join(
         [
             _extract_with_pdfplumber(pdf_path, logger),

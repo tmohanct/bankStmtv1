@@ -264,6 +264,9 @@ def _unlabelled_block(header: Header, profile: dict, name: str) -> tuple[str, st
     for i, text in left_rows[start:]:
         if not text:
             continue
+        if any(re.fullmatch(pattern, text, re.I)
+               for pattern in profile.get('unlabelled_skip_patterns', ())):
+            continue
         if re.match(r'(?i)^(?:page\b|as of\b|account statement|statement of account)', text) or any(normalized_date(m[0]) for m in DATE_RE.finditer(text)):
             if selected:
                 break

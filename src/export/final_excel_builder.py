@@ -494,6 +494,43 @@ def _apply_repeat_group_colors(workbook, sheet_name: str, amount_column: str) ->
             ws.cell(row=row_idx, column=col_idx).fill = fill
 
 
+def _apply_pdf_review_highlight(ws, header_to_col: dict[str, int]) -> None:
+    """Summarize the most severe PDF finding and highlight FAIL results only."""
+    status_col = header_to_col["status"]
+    candidates = [
+        (str(ws.cell(row, status_col).value or "").strip().upper(), row)
+        for row in range(PDF_STATUS_TABLE_START_ROW + 1, ws.max_row + 1)
+        if str(ws.cell(row, status_col).value or "").strip().upper() in PDF_STATUS_RANK
+    ]
+    severity = max((status for status, _ in candidates), key=PDF_STATUS_RANK.get, default="WARNING")
+    worst_rows = [row for status, row in candidates if status == severity]
+    check_col = header_to_col.get("check")
+    overall_rows = [row for row in worst_rows if check_col and
+                    ws.cell(row, check_col).value == "Overall PDF modification status"]
+    selected = next(iter(overall_rows or worst_rows), None)
+    result_col, pdf_col = header_to_col.get("result"), header_to_col.get("pdf")
+    result = ws.cell(selected, result_col).value if selected and result_col else None
+    message = str(result or "Review required; see checks below.")
+    pdfs = {ws.cell(row, pdf_col).value for _, row in candidates if pdf_col and ws.cell(row, pdf_col).value}
+    if len(pdfs) > 1 and selected and pdf_col:
+        message = f"Most severe finding across all PDFs. {ws.cell(selected, pdf_col).value}: {message}"
+
+    review_row = PDF_STATUS_TABLE_START_ROW - 2
+    ws.cell(review_row, 1, "PDF review:")
+    ws.cell(review_row, 2, _sanitize_excel_value(f"{severity}: {message}"))
+    ws.merge_cells(start_row=review_row, start_column=2, end_row=review_row, end_column=5)
+
+    if severity != "FAIL":
+        return
+
+    for row in (1, review_row):
+        for col in range(1, 6):
+            cell = ws.cell(row, col)
+            cell.fill = PatternFill(fill_type="solid", fgColor="C00000")
+            cell.font = Font(name="Aptos", size=16 if row == 1 else 12, bold=True, color="FFFFFF")
+            cell.alignment = ALIGN_LEFT
+
+
 def _apply_pdf_status_style(
     workbook,
     sheet_name: str,
@@ -509,6 +546,8 @@ def _apply_pdf_status_style(
         value_cell = ws.cell(row=row_idx, column=2)
         label_cell.value = _sanitize_excel_value(f"{label}:")
         value_cell.value = _sanitize_excel_value(value)
+        if label == "Account Number":
+            value_cell.number_format = "@"
         label_cell.font = FONT_HEADER
         value_cell.font = FONT_NORMAL
         label_cell.alignment = ALIGN_LEFT
@@ -571,6 +610,8 @@ def _apply_pdf_status_style(
         cell.font = Font(name="Aptos", size=10, bold=True)
         cell.alignment = ALIGN_CENTER
 
+    _apply_pdf_review_highlight(ws, header_to_col)
+
     table_widths: dict[int, float] = {}
     for col_idx in range(1, ws.max_column + 1):
         column_letter = ws.cell(row=table_header_row, column=col_idx).column_letter
@@ -585,14 +626,15 @@ def _apply_pdf_status_style(
         table_widths[col_idx] = width
 
     for row_idx in range(1, ws.max_row + 1):
-        if row_idx <= len(PDF_ACCOUNT_SUMMARY_LABELS):
+        if row_idx <= PDF_STATUS_TABLE_START_ROW - 2:
             label = str(ws.cell(row=row_idx, column=1).value or "")
             value = str(ws.cell(row=row_idx, column=2).value or "")
-            label_width = max(1, int(table_widths.get(1, 10)) - 3)
-            value_width = max(1, int(sum(table_widths.get(col, 10) for col in range(2, 6))) - 3)
-            label_lines = max(1, (len(label) + label_width - 1) // label_width)
-            value_lines = max(1, (len(value) + value_width - 1) // value_width)
-            ws.row_dimensions[row_idx].height = min(409, max(30, 14 * max(label_lines, value_lines) + 8))
+            font_size = max(ws.cell(row_idx, col).font.sz or 10 for col in (1, 2))
+            label_width = max(1, int((table_widths.get(1, 10) - 3) * 10 / font_size))
+            value_width = max(1, int((sum(table_widths.get(col, 10) for col in range(2, 6)) - 3) * 10 / font_size))
+            label_lines = sum(max(1, (len(line) + label_width - 1) // label_width) for line in label.split("\n"))
+            value_lines = sum(max(1, (len(line) + value_width - 1) // value_width) for line in value.split("\n"))
+            ws.row_dimensions[row_idx].height = min(409, max(30, font_size * 1.4 * max(label_lines, value_lines) + 12))
         else:
             line_counts = []
             for col, width in table_widths.items():

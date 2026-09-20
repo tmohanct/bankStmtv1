@@ -24,7 +24,9 @@ PDF_STATUS_PROFILE = {
     "aliases": [
         "HDFC Bank"
     ],
-    "unlabelled_left": True
+    "unlabelled_left": True,
+    # The logo slogan sits above the unlabelled customer/address block.
+    "unlabelled_skip_patterns": (r"We\s*understand\s*your\s*world[.!]?",),
 }
 
 

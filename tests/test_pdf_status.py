@@ -1,12 +1,13 @@
 """PDF_Status regressions using synthetic PDFs, without customer data."""
 import hashlib
+from io import BytesIO
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import fitz
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from src.export import final_excel_builder as builder
 from src.transform.pdf_status import inspect_pdf, metadata_datetime
@@ -57,6 +58,48 @@ class PDFStatusTests(unittest.TestCase):
             'Customer Name': 'TEST TRADERS', 'Bank Name': 'Axis Bank',
             'Account Number': '000123456789', 'Address': '12 TEST ROAD',
             'Statement Date Between': '2026-01-01 to 2026-01-31'})
+
+    def test_hdfc_slogan_is_not_customer_or_address_in_text_and_ocr(self):
+        for ocr, slogan, customer in (
+            (False, 'We understand your world', 'M/S. ALPHA TRADERS'),
+            (True, 'WE UNDERSTAND YOUR WORLD.', 'M/S. ALPHA TRADERS'),
+            (True, 'Weunderstandyourworld', 'TEST PERSON'),
+        ):
+            with self.subTest(ocr=ocr, slogan=slogan, customer=customer):
+                with fitz.open() as doc:
+                    page = doc.new_page()
+                    entries = [
+                        (20, 25, 'HDFC BANK'), (20, 42, slogan),
+                        (330, 42, 'Account Branch: TEST BRANCH'),
+                        (330, 60, 'Address: HDFC BANK LTD'),
+                        (330, 78, '99 BANK ROAD'),
+                        (20, 82, customer), (20, 100, 'C/O ALPHA TRADERS'),
+                        (20, 118, '36 CUSTOMER ROAD'), (20, 136, 'MADURAI 625020'),
+                        (20, 154, 'TAMIL NADU'), (20, 175, 'JOINT HOLDERS:'),
+                        (330, 118, 'Account No: 000123456789'),
+                        (330, 136, 'RTGS/NEFT IFSC: HDFC0001234'),
+                        (20, 205, 'Statement From: 01/04/2026 To: 07/09/2026'),
+                        (20, 230, 'Date Narration Chq Debit Credit Balance'),
+                    ]
+                    for x, y, text in entries:
+                        page.insert_text((x, y), text, fontsize=9)
+                    words = page.get_text('words')
+                    if ocr:
+                        # Use a real raster-only page, with deterministic OCR words.
+                        raster = page.get_pixmap().tobytes('png')
+                        doc.delete_page(0)
+                        page = doc.new_page()
+                        page.insert_image(page.rect, stream=raster)
+                    doc.save(self.path)
+                with patch('src.utils.pdf_status_reader.ocr_words', return_value=words):
+                    result = read_first_page(self.path)
+                self.assertEqual(result.values, {
+                    'Customer Name': customer, 'Bank Name': 'HDFC Bank',
+                    'Account Number': '000123456789',
+                    'Address': 'C/O ALPHA TRADERS 36 CUSTOMER ROAD MADURAI 625020 TAMIL NADU',
+                    'Statement Date Between': '2026-04-01 to 2026-09-07',
+                })
+                self.assertEqual('OCR' in result.sources['Customer Name'], ocr)
 
     def test_content_change_between_revisions(self):
         create_pdf(self.path)
@@ -393,6 +436,80 @@ class PDFStatusTests(unittest.TestCase):
         self.assertEqual(other.column_dimensions['A'].width, 29)
         self.assertGreater(status.row_dimensions[9].height, 36)
         self.assertEqual(status.freeze_panes, 'A9')
+
+    def styled_audit(self, rows):
+        book = Workbook()
+        sheet = book.active
+        sheet.title = 'PDF_Status'
+        for col, label in enumerate(builder.PDF_STATUS_COLUMNS, 1):
+            sheet.cell(8, col, label)
+        for index, record in enumerate(rows, 9):
+            for col, label in enumerate(builder.PDF_STATUS_COLUMNS, 1):
+                sheet.cell(index, col, record[label])
+        builder._apply_pdf_status_style(book, sheet.title, [
+            (label, 'TEST TRADERS' if label == 'Customer Name' else 'sample')
+            for label in builder.PDF_ACCOUNT_SUMMARY_LABELS
+        ])
+        output = BytesIO()
+        book.save(output)
+        output.seek(0)
+        return load_workbook(output)['PDF_Status']
+
+    def test_metadata_warning_does_not_highlight_customer_or_review(self):
+        create_pdf(self.path, {'creationDate': 'D:20260101000000Z', 'modDate': 'D:20260102000000Z'})
+        sheet = self.styled_audit(audit(self.path))
+        self.assertEqual(sheet['B1'].value, 'TEST TRADERS')
+        self.assertEqual(sheet['B1'].fill.fgColor.rgb[-6:], 'F2F2F2')
+        self.assertEqual(sheet['A1'].fill.fgColor.rgb[-6:], 'F2F2F2')
+        self.assertIn('B1:E1', {str(merged) for merged in sheet.merged_cells.ranges})
+        self.assertEqual(sheet['B1'].font.sz, 10)
+        self.assertFalse(sheet['B1'].font.bold)
+        self.assertIn('WARNING: Possible manual editing', sheet['B6'].value)
+        self.assertIsNone(sheet['B6'].fill.fill_type)
+        warning_row = next(
+            row for row in range(9, sheet.max_row + 1)
+            if sheet.cell(row, 3).value == 'WARNING'
+        )
+        self.assertEqual(sheet.cell(warning_row, 3).fill.fgColor.rgb[-6:], 'FFF2CC')
+
+    def test_ocr_warning_does_not_highlight_customer(self):
+        create_pdf(self.path)
+        header = read_first_page(self.path, allow_ocr=False)
+        header.sources['Customer Name'] = 'Page 1 OCR text'
+        sheet = self.styled_audit(inspect_pdf(self.path, first_page=header))
+        self.assertEqual(sheet['B1'].fill.fgColor.rgb[-6:], 'F2F2F2')
+        self.assertEqual(sheet['B1'].font.sz, 10)
+        self.assertIn('Inconclusive', sheet['B6'].value)
+        self.assertNotIn('Content changes detected', sheet['B6'].value)
+
+    def test_customer_highlight_worst_status_across_pdfs(self):
+        create_pdf(self.path, {'creator': 'Microsoft Word'})
+        rows = audit(self.path)
+        changed = self.path.with_name('changed.pdf')
+        create_pdf(changed)
+        with fitz.open(changed) as doc:
+            doc[0].insert_text((40, 240), 'Extra transaction 5000.00')
+            doc.saveIncr()
+        sheet = self.styled_audit(rows + audit(changed))
+        self.assertEqual(sheet['B1'].value, 'TEST TRADERS')
+        self.assertEqual(sheet['B1'].fill.fgColor.rgb[-6:], 'C00000')
+        self.assertEqual(sheet['B1'].font.color.rgb[-6:], 'FFFFFF')
+        self.assertIn('FAIL:', sheet['B6'].value)
+        self.assertIn('changed.pdf: Content changes detected', sheet['B6'].value)
+        self.assertIn('across all PDFs', sheet['B6'].value)
+
+    def test_customer_highlight_does_not_call_access_failure_an_edit(self):
+        sheet = self.styled_audit(audit(self.path))
+        self.assertEqual(sheet['B1'].fill.fgColor.rgb[-6:], 'C00000')
+        self.assertIn('Cannot assess', sheet['B6'].value)
+        self.assertNotIn('Content changes detected', sheet['B6'].value)
+
+    def test_clean_pdf_customer_row_remains_neutral(self):
+        create_pdf(self.path)
+        sheet = self.styled_audit(audit(self.path))
+        self.assertEqual(sheet['B1'].fill.fgColor.rgb[-6:], 'F2F2F2')
+        self.assertEqual(sheet['B1'].font.sz, 10)
+        self.assertIn('PASS: No evidence of manual editing found', sheet['B6'].value)
 
 
 if __name__ == '__main__':
