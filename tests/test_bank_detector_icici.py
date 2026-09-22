@@ -18,6 +18,17 @@ class IciciBankDetectorTests(unittest.TestCase):
 
         self.assertEqual(_detect_from_text(statement_text), "icici")
 
+    def test_transaction_list_layout_outweighs_counterparty_bank(self) -> None:
+        statement_text = """
+        DETAILED STATEMENT
+        Transactions List - -VRS AGENCIES (INR) - 617705500043
+        Transaction ID Value Date Txn Posted Date ChequeNo. Description Cr/Dr
+        Transaction Amount(INR) Available Balance(INR)
+        UPI/customer/INDIAN BANK/reference
+        """
+
+        self.assertEqual(_detect_from_text(statement_text), "icici")
+
 
 if __name__ == "__main__":
     unittest.main()

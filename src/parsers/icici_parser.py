@@ -307,7 +307,18 @@ def parse_savings_transaction_layout(
 
 
 # PDF_Status only. Transaction parsing does not use this profile.
-PDF_STATUS_PROFILE = {'name': 'ICICI Bank', 'ifsc': 'ICIC', 'aliases': ['ICICI Bank']}
+PDF_STATUS_PROFILE = {
+    "name": "ICICI Bank",
+    "ifsc": "ICIC",
+    "aliases": ["ICICI Bank"],
+    # ICICI corporate exports can carry the bank name only in a raster logo.
+    # The native-text statement title is a stable issuer/layout identifier.
+    "header_pattern": r"\bDETAILED\s+STATEMENT\b[\s\S]*\bTransactions\s+List\b",
+    "identity_pattern": (
+        r"\bTransactions\s+List\s*-\s*-?(?P<name>.+?)\s*"
+        r"\([A-Z]{3}\)\s*-\s*(?P<account>[0-9Xx* -]{6,34})\b"
+    ),
+}
 
 
 RENDER_ZOOM = 2.0
@@ -366,6 +377,17 @@ TEXT_SUMMARY_BALANCE_PATTERNS = {
     "opening": re.compile(r"Opening\s+Bal:\s*-?\s*([0-9,]+\.\d{2})", re.IGNORECASE),
     "closing": re.compile(r"Closing\s+Bal:\s*-?\s*([0-9,]+\.\d{2})", re.IGNORECASE),
 }
+TRANSACTION_LIST_LAYOUT_MARKERS = (
+    "DETAILED STATEMENT",
+    "TRANSACTIONS LIST",
+    "VALUE DATE",
+    "TXN POSTED DATE",
+    "CHEQUENO.",
+    "DESCRIPTION",
+    "CR/DR",
+    "AMOUNT(INR)",
+    "BALANCE(INR)",
+)
 ICICI_CLG_CHEQUE_RE = re.compile(r"^CLG/(?:[^/]+/)+(?P<cheque>\d{4,7})(?:/|$)", re.IGNORECASE)
 ICICI_REJECT_CHEQUE_RE = re.compile(r"^REJECT:(?P<cheque>\d{1,7})(?::|$)", re.IGNORECASE)
 ICICI_RTN_CHG_CHEQUE_RE = re.compile(r"^RTN\s+CHG-\s*(?P<cheque>\d{1,7})(?:/|$)", re.IGNORECASE)
@@ -821,6 +843,158 @@ def _extract_statement_balance_summary(pdf_path: str, logger) -> dict[str, float
 
     logger.debug("ICICI statement balance summary: %s", balances)
     return balances
+
+
+def _is_transaction_list_text_layout(text: str) -> bool:
+    # JasperReports can split a single header word across lines (for example,
+    # ``Transactio\nn ID``), so compare compact alphanumeric forms.
+    normalized = re.sub(r"[^A-Z0-9]+", "", text.upper())
+    return all(
+        re.sub(r"[^A-Z0-9]+", "", marker) in normalized
+        for marker in TRANSACTION_LIST_LAYOUT_MARKERS
+    )
+
+
+def _transaction_list_record_from_row(
+    row: list[Any],
+    logger,
+) -> tuple[int, dict[str, Any]] | None:
+    if len(row) < 9:
+        return None
+
+    serial_text = clean_cell(row[0])
+    if not TEXT_SERIAL_RE.fullmatch(serial_text):
+        return None
+
+    posted_text = clean_cell(row[3])
+    value_date_text = clean_cell(row[2])
+    posted_date = posted_text.split()[0] if posted_text else ""
+    raw_date = posted_date if _is_text_date_token(posted_date) else value_date_text
+    if not _is_text_date_token(raw_date):
+        logger.warning(
+            "ICICI transaction-list row skipped with invalid date: serial=%s posted=%s value=%s",
+            serial_text,
+            posted_text,
+            value_date_text,
+        )
+        return None
+
+    drcr = clean_cell(row[6]).upper()
+    amount_value = _parse_positive_amount(clean_cell(row[7]))
+    # JasperReports wraps the last balance digit onto another line. Removing
+    # whitespace reconstructs values such as '-\n2,54,79,975.4\n3'.
+    balance_text = re.sub(r"\s+", "", str(row[8] or ""))
+    balance_value = parse_amount(balance_text)
+    if drcr not in {"DR", "CR"} or amount_value is None or balance_value is None:
+        logger.warning(
+            "ICICI transaction-list row skipped with invalid amounts: serial=%s drcr=%s amount=%s balance=%s",
+            serial_text,
+            drcr,
+            row[7],
+            row[8],
+        )
+        return None
+
+    details = clean_cell(row[5]) or clean_cell(row[1])
+    cheque_number = clean_cell(row[4])
+    if cheque_number == "-":
+        cheque_number = ""
+    if not cheque_number:
+        cheque_number = _extract_icici_cheque_no(details)
+
+    record = {
+        "Sno": 0,
+        "Date": _normalize_text_date(raw_date),
+        "Details": details,
+        "Detail_Clean": clean_detail(details),
+        "Cheque No": cheque_number,
+        "Debit": amount_value if drcr == "DR" else None,
+        "Credit": amount_value if drcr == "CR" else None,
+        "Balance": balance_value,
+    }
+    return int(serial_text), record
+
+
+def _parse_transaction_list_text(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
+    """Parse ICICI corporate ``DETAILED STATEMENT`` transaction-list exports."""
+
+    logger.info("Checking ICICI transaction-list text layout: %s", pdf_path)
+    records: list[dict[str, Any]] = []
+    seen_serials: set[int] = set()
+    previous_serial: int | None = None
+    previous_balance: float | None = None
+
+    with pdfplumber.open(pdf_path) as pdf:
+        if not pdf.pages:
+            return []
+
+        first_page_text = pdf.pages[0].extract_text() or ""
+        if not _is_transaction_list_text_layout(first_page_text):
+            return []
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            page_count = 0
+            for table in page.extract_tables() or []:
+                for row in table:
+                    if not row or len(row) < 9 or not clean_cell(row[0]).isdigit():
+                        continue
+
+                    parsed = _transaction_list_record_from_row(row, logger)
+                    if parsed is None:
+                        continue
+                    serial, record = parsed
+                    if serial in seen_serials:
+                        logger.warning(
+                            "ICICI transaction-list duplicate serial skipped: page=%s serial=%s",
+                            page_number,
+                            serial,
+                        )
+                        continue
+                    if previous_serial is not None and serial != previous_serial + 1:
+                        logger.warning(
+                            "ICICI transaction-list serial gap: page=%s previous=%s current=%s",
+                            page_number,
+                            previous_serial,
+                            serial,
+                        )
+
+                    debit = record["Debit"] or 0.0
+                    credit = record["Credit"] or 0.0
+                    balance = record["Balance"]
+                    if previous_balance is not None:
+                        expected_balance = round(previous_balance + credit - debit, 2)
+                        if abs(expected_balance - balance) > 0.05:
+                            logger.warning(
+                                "ICICI transaction-list balance mismatch: page=%s serial=%s "
+                                "expected=%.2f parsed=%.2f",
+                                page_number,
+                                serial,
+                                expected_balance,
+                                balance,
+                            )
+
+                    record["Sno"] = len(records) + 1
+                    records.append(record)
+                    seen_serials.add(serial)
+                    previous_serial = serial
+                    previous_balance = balance
+                    page_count += 1
+                    if progress_cb is not None:
+                        progress_cb(len(records))
+
+            logger.debug(
+                "ICICI transaction-list page %s: parsed %s transaction row(s)",
+                page_number,
+                page_count,
+            )
+
+    logger.info(
+        "ICICI transaction-list parse complete: rows=%s first_serial=%s last_serial=%s",
+        len(records),
+        min(seen_serials) if seen_serials else None,
+        max(seen_serials) if seen_serials else None,
+    )
+    return records
 
 
 def _is_detailed_text_block_start(line: TextLine) -> bool:
@@ -1470,6 +1644,10 @@ def _parse_ocr(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
 
 
 def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
+    transaction_list_records = _parse_transaction_list_text(pdf_path, logger, progress_cb)
+    if transaction_list_records:
+        return transaction_list_records
+
     account_statement_records = _parse_account_statement_text(pdf_path, logger, progress_cb)
     if account_statement_records:
         return account_statement_records
@@ -1493,4 +1671,11 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
 
 
 BANK_CODE = 'icici'
-BANK_SIGNATURES = (('ICICI BANK', 4), ('ICIC0', 3), ('WWW.ICICIBANK.COM', 10), ('STATEMENT OF TRANSACTIONS IN SAVINGS ACCOUNT NUMBER', 5))
+BANK_SIGNATURES = (
+    ('ICICI BANK', 4),
+    ('ICIC0', 3),
+    ('WWW.ICICIBANK.COM', 10),
+    ('STATEMENT OF TRANSACTIONS IN SAVINGS ACCOUNT NUMBER', 5),
+    ('TXN POSTED DATE', 12),
+    ('TRANSACTIONS LIST', 6),
+)

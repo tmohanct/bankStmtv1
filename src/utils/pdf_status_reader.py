@@ -304,6 +304,16 @@ def extract_values(header: Header, profile_override=None) -> tuple[dict[str, str
     account = re.sub(r'[\s-]', '', match[1]) if match else ''
     if not (6 <= len(account) <= 34 and re.search(r'\d', account)):
         account = ''
+    identity_pattern = profile.get('identity_pattern')
+    if identity_pattern and (not name or not account):
+        identity_match = re.search(identity_pattern, header.text, re.I | re.S)
+        if identity_match:
+            if not name and 'name' in identity_match.groupdict():
+                name = clean(identity_match.group('name')).strip('- ')
+            if not account and 'account' in identity_match.groupdict():
+                candidate = re.sub(r'[\s-]', '', identity_match.group('account'))
+                if 6 <= len(candidate) <= 34 and re.search(r'\d', candidate):
+                    account = candidate
     address = ''
     for address_pattern in (r"Customer(?:'s)?\s+Address|Address\s+of\s+Customer", r'Communication(?:\s+Address)?', r'Mailing\s+Address', r'(?<!Branch\s)Address(?!\s+Last)'):
         address_header = Header(header.rows[name_index:], header.width) if name_index is not None and address_pattern.startswith('(?<!') else header
