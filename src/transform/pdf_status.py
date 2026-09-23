@@ -9,6 +9,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -16,17 +17,23 @@ from xml.etree import ElementTree as ET
 import fitz
 
 from src.utils.pdf_status_reader import LABELS, REQUIRED, FirstPageResult, read_first_page
+from src.utils.statement_utils import safe_pdf_display_name
+from src.transform.validate import BalanceCheckResult
+from src.transform.pdf_signature import verify_reference_hash, verify_signatures
+from src.transform.pdf_ai_provenance import AIProvenanceResult, inspect_ai_provenance
 
 COLUMNS = ['PDF', 'Check', 'Status', 'Result', 'Details']
 MAX_REVISION_CANDIDATES = 64
 MAX_REVISION_PAGE_COMPARISONS = 2000
+MAX_REVISION_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_VISUAL_OCR_PAGES = 2
 EDITOR_PATTERN = re.compile(
     r'Microsoft.*Word|LibreOffice|OpenOffice|WPS\s+(?:Office|Writer)|Foxit.*Editor|'
     r'PDF-XChange|Acrobat.*(?:Pro|PDFMaker)|Sejda|PDFescape|Master PDF Editor|'
     r'Wondershare|PDFelement', re.I)
 LIMITATION = ('These checks cannot establish who made a change or prove that the PDF is an untouched bank original. '
               'Full rewrites, flattened edits and image edits can leave no detectable history. '
-              'Digital signatures are inspected structurally, not cryptographically validated.')
+              'A signature establishes bank origin only when its signer and trust chain are independently configured and verified.')
 
 
 def row(name, check, status, result, details=''):
@@ -114,8 +121,13 @@ def revision_evidence(raw, current, password):
             break
     versions = {}
     changes, samples = [], []
+    bytes_opened = 0
     try:
         for end in boundaries:
+            if bytes_opened + end > MAX_REVISION_TOTAL_BYTES:
+                errors.append('Revision byte budget reached; history comparison is incomplete.')
+                break
+            bytes_opened += end
             previous = None
             try:
                 previous = fitz.open(stream=raw[:end], filetype='pdf')
@@ -227,10 +239,14 @@ def page_evidence(document):
             drawings = page.get_drawings()
             overprints.extend(_numeric_overprints(spans, number))
             image_hits = 0
+            image_area = 0.0
+            image_count = 0
             for seqno, (kind, bbox, *_) in enumerate(page.get_bboxlog()):
                 if kind != 'fill-image':
                     continue
                 rect = fitz.Rect(bbox)
+                image_count += 1
+                image_area += (rect & page.rect).get_area()
                 if (rect & page.rect).get_area() >= .5 * page.rect.get_area():
                     if number not in raster_pages:
                         raster_pages.append(number)
@@ -246,6 +262,8 @@ def page_evidence(document):
                             f'later image overlaps text {"".join(chr(c[0]) for c in chars)[:90]!r}')
                         image_hits += 1
                         break
+            if image_count > 1 and image_area >= .5 * page.rect.get_area() and number not in raster_pages:
+                raster_pages.append(number)
             if not page.get_text().strip():
                 scanned.append(number)
             fonts = sorted({s['font'] for s in spans if s['type'] != 3})
@@ -287,6 +305,34 @@ def page_evidence(document):
         except Exception as exc:
             errors.append(f'Page {number}: {type(exc).__name__}: {exc}')
     return covered, hidden, annotations, errors, scanned, fonts_by_page, image_overlays, overprints, raster_pages
+
+
+def visual_text_evidence(document, candidate_pages):
+    """Compare high-confidence OCR amounts with the PDF text layer on risky pages."""
+    from src.utils.pdf_status_reader import ocr_words
+
+    candidates = sorted(set(candidate_pages))
+    reviewed, errors, findings = [], [], []
+    if len(candidates) > MAX_VISUAL_OCR_PAGES:
+        errors.append(f'Visual OCR limited to {MAX_VISUAL_OCR_PAGES} of {len(candidates)} candidate pages.')
+    amount_pattern = re.compile(r'(?<!\w)\d[\d,]*\.\d{2}(?!\w)')
+    for number in candidates[:MAX_VISUAL_OCR_PAGES]:
+        try:
+            page = document[number - 1]
+            visible = ' '.join(word[4] for word in ocr_words(page, zoom=2, min_confidence=85))
+            extracted = page.get_text(sort=True)
+            ocr_amounts = Counter(value.replace(',', '') for value in amount_pattern.findall(visible))
+            text_amounts = Counter(value.replace(',', '') for value in amount_pattern.findall(extracted))
+            unmatched = list((ocr_amounts - text_amounts).elements())
+            reviewed.append(f'Page {number}: {sum(ocr_amounts.values())} high-confidence visual amount(s), '
+                            f'{sum(text_amounts.values())} extractable amount(s).')
+            if unmatched and text_amounts:
+                findings.append(f'Page {number}: visually read amounts absent from text layer: {unmatched[:8]}')
+            elif not text_amounts:
+                errors.append(f'Page {number}: no extractable amounts to compare with visual OCR.')
+        except Exception as exc:
+            errors.append(f'Page {number}: visual OCR unavailable ({type(exc).__name__}).')
+    return reviewed, findings, errors
 
 
 def object_evidence(document, raw):
@@ -331,28 +377,62 @@ def object_evidence(document, raw):
     return signatures, actions, forms, errors
 
 
-def _inspect_pdf(path: Path, password: str | None = None, *, first_page: FirstPageResult | None = None):
+def _inspect_pdf(path: Path, password: str | None = None, *, first_page: FirstPageResult | None = None,
+                 audit: dict[str, object] | None = None):
     path = Path(path)
-    name = path.name
+    name = safe_pdf_display_name(path)
     rows = []
-    suspicion, confirmed, incomplete = [], [], []
+    suspicion, confirmed, incomplete, integrity, signature_failure, reference_mismatch = [], [], [], [], [], []
+    authenticated = False
+    ai_provenance = None
     try:
         raw = path.read_bytes()
         document = fitz.open(stream=raw, filetype='pdf')
     except Exception as exc:
-        return [row(name, 'Overall PDF modification status', 'FAIL', 'Cannot assess - PDF is inaccessible', str(exc)),
-                row(name, 'File access', 'FAIL', 'PDF could not be read', str(exc))]
+        return [row(name, 'Overall PDF modification status', 'UNASSESSABLE', 'Cannot assess - PDF is inaccessible', str(exc)),
+                row(name, 'File access', 'UNASSESSABLE', 'PDF could not be read', str(exc))]
     with document:
         encrypted = bool(document.needs_pass)
         if encrypted and (not password or not document.authenticate(password)):
-            return [row(name, 'Overall PDF modification status', 'FAIL', 'Cannot assess - password required or incorrect', LIMITATION),
-                    row(name, 'File access', 'FAIL', 'Password authentication failed'),
+            return [row(name, 'Overall PDF modification status', 'UNASSESSABLE', 'Cannot assess - password required or incorrect', LIMITATION),
+                    row(name, 'File access', 'UNASSESSABLE', 'Password authentication failed'),
                     row(name, 'File fingerprint (SHA-256)', 'PASS', hashlib.sha256(raw).hexdigest(), 'Fingerprint of the original source bytes.')]
         if not document.is_pdf or not len(document):
-            return [row(name, 'Overall PDF modification status', 'FAIL', 'Cannot assess - no PDF pages')]
+            return [row(name, 'Overall PDF modification status', 'UNASSESSABLE', 'Cannot assess - no PDF pages')]
         rows.append(row(name, 'File access', 'PASS', f'Opened {len(document)} page(s)', 'Original PDF inspected in memory.'))
         rows.append(row(name, 'File fingerprint (SHA-256)', 'PASS', hashlib.sha256(raw).hexdigest(), 'Identifies this exact file for later comparison; not proof of bank origin.'))
+        reference = verify_reference_hash(raw, path)
+        if reference:
+            ref_status, ref_result, ref_detail = reference
+            rows.append(row(name, 'Trusted source fingerprint', ref_status, ref_result, ref_detail))
+            if ref_result == 'Matches configured reference PDF':
+                authenticated = True
+            elif ref_result == 'Differs from configured reference PDF':
+                reference_mismatch.append(ref_result)
+            else:
+                incomplete.append(ref_result)
         rows.append(row(name, 'Encryption', 'PASS', 'Password authenticated' if encrypted else 'No opening password required', 'Encryption itself is not evidence of editing.'))
+        try:
+            ai_provenance = inspect_ai_provenance(document)
+        except Exception as exc:
+            ai_provenance = AIProvenanceResult(
+                'INCONCLUSIVE', 'AI provenance inspection incomplete',
+                f'AI metadata check failed: {type(exc).__name__}', incomplete=True)
+        rows.append(row(name, 'AI provenance', ai_provenance.status,
+                        ai_provenance.result, ai_provenance.details))
+        if ai_provenance.incomplete:
+            incomplete.append('AI provenance inspection incomplete; see AI provenance details')
+        if audit and isinstance(audit.get('balance_check'), BalanceCheckResult):
+            balance = audit['balance_check']
+            if balance.status == 'mismatch':
+                integrity.append(f'{len(balance.mismatches)} running balance mismatch(es)')
+            elif balance.status in ('partial', 'unavailable'):
+                incomplete.append('Running balance comparison incomplete or unavailable')
+            rows.append(row(name, 'Running balance consistency',
+                            'WARNING' if balance.status != 'passed' else 'PASS',
+                            f'{len(balance.mismatches)} mismatch(es); {balance.compared} adjacent pair(s) checked',
+                            f'Order: {balance.direction}; pairs without usable balances: {balance.missing}.\n'
+                            + '\n'.join(balance.mismatches[:40])))
         if document.is_repaired:
             incomplete.append('PDF structure required repair')
         rows.append(row(name, 'PDF structure repair', 'WARNING' if document.is_repaired else 'PASS',
@@ -467,6 +547,22 @@ def _inspect_pdf(path: Path, password: str | None = None, *, first_page: FirstPa
                         f'{len(raster_pages)} page(s) with large raster images',
                         f'Pages: {raster_pages[:40]}. Flattened image edits cannot be established from text checks.' if raster_pages
                         else 'No single image covers half or more of a page. Smaller image edits remain possible.'))
+        candidate_pages = set(raster_pages) | set(scanned)
+        candidate_pages.update(int(match[1]) for item in image_overlays
+                               if (match := re.match(r'Page (\d+)', item)))
+        if candidate_pages:
+            visual_review, visual_findings, visual_errors = visual_text_evidence(document, candidate_pages)
+            if visual_findings:
+                suspicion.append('Visible monetary amounts disagree with the extractable text layer')
+            incomplete.extend(visual_errors)
+            rows.append(row(name, 'Visual OCR versus PDF text',
+                            'WARNING' if visual_findings or visual_errors else 'PASS',
+                            f'{len(visual_findings)} possible mismatch(es) on {len(visual_review)} checked page(s)',
+                            '\n'.join([*visual_review, *visual_findings, *visual_errors])))
+        else:
+            rows.append(row(name, 'Visual OCR versus PDF text', 'PASS',
+                            'No image-heavy page selected for OCR comparison',
+                            'OCR is targeted to raster pages, textless pages and image overlays.'))
         if covered:
             suspicion.append('Text is covered by later opaque rectangles')
         incomplete.extend(page_errors)
@@ -501,13 +597,25 @@ def _inspect_pdf(path: Path, password: str | None = None, *, first_page: FirstPa
         if actions or forms:
             suspicion.append('Active content or editable form fields are present')
         rows.append(row(name, 'Digital signature', 'WARNING' if signatures or object_errors else 'PASS',
-                        f'{len(signatures)} signature object(s) found; not cryptographically validated' if signatures else 'No digital signature byte range found',
+                        f'{len(signatures)} signature object(s) found; see cryptographic check' if signatures else 'No digital signature byte range found',
                         '\n'.join(f'Object {xref}: structural range {"valid" if valid else "invalid"}; unsigned trailing bytes: {trailing}' for xref, valid, trailing in signatures)
                         or 'No verified bank signature or trusted original was supplied.'))
-        if signatures:
-            incomplete.append('Digital signatures require cryptographic verification and issuer trust validation')
         if any(not valid or trailing for _, valid, trailing in signatures):
             suspicion.append('Invalid signature byte range or bytes after a signed revision')
+        if signatures:
+            sig_status, sig_result, sig_detail = verify_signatures(
+                raw, path, password, (audit or {}).get('bank'))
+            if sig_status == 'FAIL':
+                signature_failure.append(sig_result)
+            elif sig_status == 'WARNING':
+                incomplete.append(sig_result)
+            elif sig_status == 'PASS' and all(valid and not trailing for _, valid, trailing in signatures):
+                rows[-1]['Status'] = 'PASS'
+                authenticated = True
+            rows.append(row(name, 'Cryptographic signature verification', sig_status, sig_result, sig_detail))
+        else:
+            rows.append(row(name, 'Cryptographic signature verification', 'PASS',
+                            'No embedded signature detected', 'No bank signature is available to establish authenticity.'))
         if page_errors or object_errors:
             page_checks = {'Image overlays', 'Conflicting amount overprints', 'Raster image coverage',
                            'Text overlays and cover-ups', 'Hidden text', 'Annotations', 'Page font inventory'}
@@ -521,6 +629,20 @@ def _inspect_pdf(path: Path, password: str | None = None, *, first_page: FirstPa
     if confirmed:
         status, result = 'FAIL', 'Content changes detected after an earlier save'
         explanation = 'PDF page content changed. This establishes a saved content change, not who made it or whether it was authorized.'
+    elif signature_failure:
+        status, result = 'FAIL', 'Cryptographic signature integrity failed'
+        explanation = '\n'.join(dict.fromkeys(signature_failure))
+    elif ai_provenance and ai_provenance.detected:
+        status, result = 'WARNING', 'AI processing evidence detected - review required'
+        explanation = ai_provenance.details
+        if reference_mismatch or integrity or suspicion:
+            explanation += '\nOther indicators: ' + '; '.join(dict.fromkeys(reference_mismatch + integrity + suspicion))
+    elif reference_mismatch:
+        status, result = 'WARNING', 'Source differs from configured reference'
+        explanation = '\n'.join(dict.fromkeys(reference_mismatch + integrity + suspicion))
+    elif integrity:
+        status, result = 'WARNING', 'Transaction integrity requires review'
+        explanation = '\n'.join(dict.fromkeys(integrity + suspicion))
     elif suspicion:
         status, result = 'WARNING', 'Possible manual editing - review evidence'
         explanation = '\n'.join(dict.fromkeys(suspicion))
@@ -528,20 +650,32 @@ def _inspect_pdf(path: Path, password: str | None = None, *, first_page: FirstPa
         status, result = 'WARNING', 'Inconclusive - inspection has limitations'
         explanation = '\n'.join(dict.fromkeys(incomplete))
     else:
-        status, result = 'PASS', 'No evidence of manual editing found'
+        status, result = 'PASS', 'Reference match or bank signature verified' if authenticated else 'No evidence of manual editing found'
         explanation = 'All available page, revision, metadata and object checks completed.'
-    if confirmed and suspicion:
-        explanation += '\nOther indicators: ' + '; '.join(dict.fromkeys(suspicion))
-    if (confirmed or suspicion) and incomplete:
+    if confirmed and (signature_failure or reference_mismatch or integrity or suspicion):
+        explanation += '\nOther indicators: ' + '; '.join(dict.fromkeys(
+            signature_failure + reference_mismatch + integrity + suspicion))
+    if (confirmed or signature_failure) and ai_provenance and ai_provenance.detected:
+        explanation += '\nAI provenance: ' + ai_provenance.result + '; see AI provenance details.'
+    if (confirmed or signature_failure or reference_mismatch or suspicion or integrity or
+            (ai_provenance and ai_provenance.detected)) and incomplete:
         explanation += '\nLimitations: ' + '; '.join(dict.fromkeys(incomplete))
     return [row(name, 'Overall PDF modification status', status, result, explanation + '\n' + LIMITATION), *rows]
 
 
-def inspect_pdf(path: Path, password: str | None = None, *, first_page: FirstPageResult | None = None):
+def inspect_pdf(path: Path, password: str | None = None, *, first_page: FirstPageResult | None = None,
+                audit: dict[str, object] | None = None):
     """A failed check must never abort export or imply a clean PDF."""
     try:
-        return _inspect_pdf(path, password, first_page=first_page)
+        rows = _inspect_pdf(path, password, first_page=first_page, audit=audit)
     except Exception as exc:
-        return [row(Path(path).name, 'Overall PDF modification status', 'WARNING',
+        rows = [row(safe_pdf_display_name(path), 'Overall PDF modification status', 'WARNING',
                     'Inconclusive - inspection could not complete',
                     f'{type(exc).__name__}: {exc}\n{LIMITATION}')]
+    for item in rows:
+        for key in COLUMNS:
+            value = str(item[key])
+            value = value.replace(str(path), safe_pdf_display_name(path))
+            value = value.replace(Path(path).name, safe_pdf_display_name(path))
+            item[key] = value
+    return rows

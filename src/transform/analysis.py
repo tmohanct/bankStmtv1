@@ -9,7 +9,7 @@ import pandas as pd
 
 from src.utils.statement_utils import OUTPUT_COLUMNS, compact_detail_key
 from src.transform.normalize import sanitize_cheque_column
-from src.transform.cheque_returns import is_cheque_return
+from src.transform.cheque_returns import is_cheque_return, is_nonposting_cheque_return
 
 DATE_INPUT_FORMATS = ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y")
 
@@ -307,9 +307,6 @@ def _is_return_reject_detail(value: Any, cheque_number: Any = "", detail_clean: 
 
 
 def _build_return_reject_sheet(statement_df: pd.DataFrame) -> pd.DataFrame:
-    if statement_df.empty:
-        return _ensure_columns(statement_df)
-
     work = _ensure_columns(statement_df)
     mask = [
         _is_return_reject_detail(details, number, cleaned)
@@ -385,6 +382,9 @@ def _build_month_dr_cr_sheet(statement_df: pd.DataFrame) -> pd.DataFrame:
     work["Debit"] = pd.to_numeric(work["Debit"], errors="coerce").fillna(0.0)
     work["Credit"] = pd.to_numeric(work["Credit"], errors="coerce").fillna(0.0)
     work["Balance"] = pd.to_numeric(work["Balance"], errors="coerce")
+    # A notice's printed zero is not the account's closing ledger balance.
+    notice_mask = [is_nonposting_cheque_return(row) for row in work.to_dict("records")]
+    work.loc[notice_mask, "Balance"] = float("nan")
     work["Sno"] = pd.to_numeric(work["Sno"], errors="coerce")
     work["__month_key"] = work["__month_date"].map(lambda value: datetime(value.year, value.month, 1))
     threshold = 30.0

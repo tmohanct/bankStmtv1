@@ -5,6 +5,7 @@ import re
 from difflib import SequenceMatcher
 from typing import Any
 import pandas as pd
+from src.transform.cheque_returns import is_cheque_return
 from src.utils.statement_utils import (OUTPUT_COLUMNS, DEDUPLICATION_EXCLUDED_COLUMNS, clean_cell, clean_detail, CHEQUE_INTEGER_FLOAT_RE, CHEQUE_DIGITS_ONLY_RE, CHEQUE_DETAIL_HINT_RE, NON_CHEQUE_DETAIL_HINT_RE, COMPACT_CHEQUE_NUMBER_DETAIL_PATTERNS, CHEQUE_NUMBER_DETAIL_PATTERNS)
 
 def normalize_cheque_number(value: Any, details: Any = "") -> str:
@@ -144,6 +145,9 @@ def remove_exact_duplicate_transactions(frame: pd.DataFrame) -> pd.DataFrame:
                 if work.loc[matching_positions, "Balance"].isna().any():
                     continue
                 for position in matching_positions:
+                    row = work.iloc[position]
+                    if is_cheque_return(row.get("Details"), row.get("Cheque No"), row.get("Detail_Clean")):
+                        continue
                     keep[position] = False
         previous.setdefault(account, []).append((source, keys))
     return frame.iloc[[i for i, retain in enumerate(keep) if retain]].copy()

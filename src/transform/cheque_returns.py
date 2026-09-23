@@ -39,6 +39,7 @@ COMPACT_EVENT_RE = re.compile(
     rf"|(?:{EVENT})(?:OF)?(?:{CHEQUE}|CLG|CLEARING|CTS)"
     rf"|(?:{CHEQUE}|CLG|CLEARING|CTS)(?:RTND|RETN|RETD|RTN|RET|REJ(?:TD|T)?|RJCT)(?![A-Z])"
     r"|(?:IW|OW|INW|OUTW)REJINST"
+    rf"|CLG(?:INW|OUTW)(?:RET|REJ)(?={CHEQUE}|[0-9]|$)"
 )
 REASON_RE = re.compile(
     r"(?:FUNDS?|BALANCE)(?:ARE)?INSUFF(?:ICIENT)?"
@@ -107,3 +108,17 @@ def is_cheque_return(details: Any, cheque_number: Any = "", detail_clean: Any = 
     # This avoids classifying e.g. GOODS RETURNED as a cheque event.
     starts_with_event = bool(re.match(rf"^(?:PAYMENT\s+)?(?:{EVENT})(?![A-Z])", text))
     return has_number and (reason or starts_with_event)
+
+
+def is_nonposting_cheque_return(row) -> bool:
+    """Recognize retained cheque events with no movement in either amount column."""
+    for column in ("Debit", "Credit"):
+        value = row.get(column)
+        if value is None or value == "":
+            continue
+        try:
+            if float(value) != 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return is_cheque_return(row.get("Details"), row.get("Cheque No"), row.get("Detail_Clean"))

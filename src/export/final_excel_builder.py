@@ -86,8 +86,9 @@ PDF_STATUS_FILLS = {
     "PASS": PatternFill(fill_type="solid", fgColor="C6EFCE"),
     "WARNING": PatternFill(fill_type="solid", fgColor="FFF2CC"),
     "FAIL": PatternFill(fill_type="solid", fgColor="F4CCCC"),
+    "UNASSESSABLE": PatternFill(fill_type="solid", fgColor="D9E1F2"),
 }
-PDF_STATUS_RANK = {"PASS": 0, "WARNING": 1, "FAIL": 2}
+PDF_STATUS_RANK = {"PASS": 0, "WARNING": 1, "UNASSESSABLE": 2, "FAIL": 3}
 INDIAN_NUMBER_FORMAT = "#,##,##0.00"
 INDIAN_NUMBER_FORMAT_NO_DECIMAL = "#,##,##0"
 DATE_NUMBER_FORMAT = "yyyy-mm-dd"
@@ -190,15 +191,18 @@ def _build_pdf_account_summary_rows(
     return [(label, header.values.get(label) or "Not found on first page") for label in PDF_ACCOUNT_SUMMARY_LABELS]
 
 
-def _build_single_pdf_status_rows(pdf_path: Path, password: str | None = None) -> list[dict[str, str]]:
+def _build_single_pdf_status_rows(
+    pdf_path: Path, password: str | None = None, *, audit: dict[str, object] | None = None
+) -> list[dict[str, str]]:
     from src.transform.pdf_status import inspect_pdf
 
-    return inspect_pdf(Path(pdf_path), password)
+    return inspect_pdf(Path(pdf_path), password, audit=audit)
 
 
 def _build_pdf_status_sheet(
     source_pdf_paths: list[Path] | None,
     source_pdf_passwords: list[str | None] | None = None,
+    source_audits: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
     from src.transform.pdf_status import row
 
@@ -210,7 +214,8 @@ def _build_pdf_status_sheet(
     rows = []
     for index, path in enumerate(source_pdf_paths):
         password = source_pdf_passwords[index] if source_pdf_passwords and index < len(source_pdf_passwords) else None
-        rows.extend(_build_single_pdf_status_rows(Path(path), password))
+        audit = source_audits[index] if source_audits and index < len(source_audits) else {}
+        rows.extend(_build_single_pdf_status_rows(Path(path), password, audit=audit))
     if len(source_pdf_paths) > 1:
         rows.insert(0, row("", "Account summary scope", "PASS", "Top summary refers to the first PDF",
                            "Each PDF's first-page fields and modification findings are listed separately below."))
@@ -495,7 +500,7 @@ def _apply_repeat_group_colors(workbook, sheet_name: str, amount_column: str) ->
 
 
 def _apply_pdf_review_highlight(ws, header_to_col: dict[str, int]) -> None:
-    """Summarize the most severe PDF finding and highlight FAIL results only."""
+    """Summarize findings; reserve the red highlight for confirmed changes."""
     status_col = header_to_col["status"]
     candidates = [
         (str(ws.cell(row, status_col).value or "").strip().upper(), row)
@@ -662,6 +667,7 @@ def build_final_workbook(
     logger,
     source_pdf_paths: list[Path] | None = None,
     source_pdf_passwords: list[str | None] | None = None,
+    source_audits: list[dict[str, object]] | None = None,
     include_source: bool = True,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -672,7 +678,7 @@ def build_final_workbook(
     rules = _load_rules(rules_path, logger)
     rule_sheets = _build_rule_sheets(statement_df, rules, logger)
 
-    pdf_status_df = _build_pdf_status_sheet(source_pdf_paths, source_pdf_passwords)
+    pdf_status_df = _build_pdf_status_sheet(source_pdf_paths, source_pdf_passwords, source_audits)
     return_reject_df = _build_return_reject_sheet(statement_df)
     cheque_df = _build_cheque_sheet(statement_df)
     repeat_credit_df = _build_repeat_sheet(statement_df, "Credit")

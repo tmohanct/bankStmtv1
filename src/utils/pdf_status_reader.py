@@ -194,7 +194,7 @@ def normalized_date(value: str) -> str:
     return ''
 
 
-def statement_period(header: Header) -> str:
+def statement_period(header: Header, profile: dict | None = None) -> str:
     candidates = []
     for label in (r'Transaction\s+Period', r'Statement\s+Period', r'St\.\s*Period'):
         value, _ = header.field(label, multiline=True)
@@ -214,7 +214,15 @@ def statement_period(header: Header) -> str:
     start, _ = header.field(r'From\s+Date|Period\s+From')
     end, _ = header.field(r'To\s+Date|Period\s+To')
     start, end = normalized_date(start), normalized_date(end)
-    return f'{start} to {end}' if start and end and start <= end else ''
+    if start and end and start <= end:
+        return f'{start} to {end}'
+    if profile and profile.get('period_from_label') and profile.get('period_to_label'):
+        start, _ = header.field(re.escape(profile['period_from_label']))
+        end, _ = header.field(re.escape(profile['period_to_label']))
+        start, end = normalized_date(start), normalized_date(end)
+        if start and end and start <= end:
+            return f'{start} to {end}'
+    return ''
 
 
 def identify_bank(header: Header) -> tuple[dict, str]:
@@ -347,7 +355,7 @@ def extract_values(header: Header, profile_override=None) -> tuple[dict[str, str
     if account:
         name = re.split(re.escape(account), name)[0].strip(' -')
     name = re.split(r'(?i)\b(?:Primary\s+GSTIN|Account\s+Type|Contact\s+No)\b', name)[0].strip()
-    period = statement_period(header)
+    period = statement_period(header, profile)
     sources = {label: 'Page 1 text' for label in LABELS}
     sources['Bank Name'] = bank_source
     if not period and profile.get('balance_period'):

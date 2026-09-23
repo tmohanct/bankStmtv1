@@ -188,17 +188,20 @@ The top block summarizes the first source PDF:
 - Address
 - Statement Date Between
 
-The table below contains `PDF`, `Check`, `Status`, `Result`, and `Details` for every PDF, with PASS/WARNING/FAIL colors.
+The table below contains `PDF`, `Check`, `Status`, `Result`, and `Details` for every PDF, with PASS/WARNING/FAIL/UNASSESSABLE colors. Passwords embedded in PDF filenames are removed from workbook display names.
 
 Checks include:
 
 - Original-source SHA-256 fingerprint, access/password authentication and structure repair.
+- Optional byte-for-byte comparison with a separately obtained reference SHA-256. A match is reported as a reference match; a difference is a review finding even when it is only a benign resave.
 - Parser-reported saved revision count, followed by text and rendered-page comparisons of retained revisions, including subsequently reverted edits. Metadata-only saves are not content edits. Signature widgets and annotations are excluded from the rendered comparison and reported separately.
 - Creation/modification dates with timezone handling, creator/producer software and XMP dates, software and edit history.
+- AI provenance from embedded C2PA Content Credentials (including catalog-associated manifests), creator/producer fields and dedicated XMP software/source fields. This check reads metadata only, not statement text. Structured claims/actions can identify ChatGPT, a GPT software agent, or an AI digital-source declaration even when the original PDF creator and date are unchanged.
 - Every page's text cover-ups, images drawn over earlier visible text, conflicting monetary amounts printed at substantially overlapping positions, invisible text, annotations and font inventory. Ordinary backgrounds drawn before text, duplicate same-amount painting and font variation alone are not edit evidence.
-- Large raster images (one image covering at least half a page), including pages that also contain searchable text. Their contents require review; the audit does not authenticate image pixels or compare OCR against bank records.
+- Large raster images (including multiple image tiles covering at least half a page), including pages that also contain searchable text. Up to two image-heavy or textless pages are OCR-scanned to compare high-confidence visible amounts with the PDF text layer. OCR discrepancies require visual review; OCR is not proof of an edit.
+- Running-balance arithmetic between adjacent parsed transactions, in either ascending or descending statement order. Missing balances are reported as incomplete coverage. A mismatch may also indicate a parser error.
 - Parsed active objects, editable fields and XFA forms.
-- Signature byte-range syntax, bounds, populated excluded signature bytes and bytes appended after a signed revision. This is structural inspection only; signature cryptography and bank certificate trust are **not** verified.
+- Signature byte-range syntax, bounds, populated excluded signature bytes and bytes appended after a signed revision. pyHanko also checks signature cryptography. Bank identity is verified only when bank-specific trust roots and a pinned signer certificate are configured as described below.
 
 The overall `Result` distinguishes:
 
@@ -206,19 +209,54 @@ The overall `Result` distinguishes:
 | --- | --- |
 | Content changes detected after an earlier save | Retained PDF versions show a text, appearance or page-count change. This does not establish who changed it or whether the change was authorized. |
 | Possible manual editing - review evidence | Suspicious features were found; page/object references and available examples are included. These can have legitimate explanations. |
+| AI processing evidence detected - review required | C2PA or dedicated metadata records AI processing. This is a WARNING, not proof that amounts were changed or that fraud occurred. Existing confirmed content/signature failures retain FAIL priority. |
 | Inconclusive - inspection has limitations | Checks failed, coverage was incomplete, images/OCR limit assessment, or signatures require verification. |
 | No evidence of manual editing found | Available checks completed without indicators. This is not proof of an untouched bank original. |
-| Cannot assess | The file could not be opened/authenticated or contained no usable PDF pages. A FAIL here means access failure, not a confirmed edit. |
+| Transaction integrity requires review | Parsed running balances are inconsistent. This may be a source-PDF or parser issue. |
+| Cryptographic signature integrity failed | A signature's cryptographic integrity check failed. |
+| Source differs from configured reference | The current PDF bytes do not match the configured reference SHA-256. |
+| Reference match or bank signature verified | A configured reference hash matches or a trusted bank signature covers the entire file; other inspection checks also passed. |
+| Cannot assess | The file could not be opened/authenticated or contained no usable PDF pages. This uses `UNASSESSABLE`, not the red `FAIL` reserved for detected content or signature-integrity failures. |
 
-A failed check must not erase already detected content changes. Revision comparison is bounded to 64 candidate byte boundaries and 2,000 page pairs; reaching either limit is explicitly reported as incomplete. Comparison rendering is capped at 144 dpi and a 1,600-pixel longest side, so very small visual differences may escape it. Text comparison uses full extracted text; evidence examples are shortened for workbook readability.
+A failed check must not erase already detected content changes. Revision comparison is bounded to 64 candidate byte boundaries, 256 MiB of reopened revision bytes and 2,000 page pairs; reaching any limit is explicitly reported as incomplete. Comparison rendering is capped at 144 dpi and a 1,600-pixel longest side, so very small visual differences may escape it. Text comparison uses full extracted text; evidence examples are shortened for workbook readability.
 
 Image-overlap detection uses drawing order and bounding boxes; transparency or clipping can produce benign overlaps. Full rewrites, flattened edits and image edits can leave no recoverable evidence. No unsigned-PDF heuristic can reliably answer "never edited"; obtain an independently trusted bank original or perform cryptographic signature and issuer validation when authenticity must be established.
+
+The `AI provenance` check reports a stable code in its Details: `AI_PROVENANCE_RECORDED`, `AI_METADATA_RECORDED`, `NO_AI_EVIDENCE`, or `INCONCLUSIVE`. The standalone `inspect_ai_provenance(document)` API in `src/transform/pdf_ai_provenance.py` returns the code, result, evidence, detected and incomplete flags. `detected` means an explicit declaration was found; it is not an authenticated verdict. No evidence must never be interpreted as "not AI modified". Missing decoders, malformed records and exceeded inspection limits are reported as incomplete. AI evidence already found is preserved if another check fails.
+
+C2PA is not automatically AI evidence: ordinary camera/editor credentials and training-permission declarations are not AI-generation signals. The AI check parses claims and actions but does not validate C2PA signatures, assertion/file bindings, signer identity, certificate trust or revocation. The separate bank-signature check does not validate C2PA. Attached/associated manifests are inspected within limits of 32 entries per collection, 8 MiB per attachment, 16 MiB of attachment bytes, 2,048 JUMBF boxes and 12 nesting levels. External manifests are not fetched. See the [C2PA specification](https://spec.c2pa.org/specifications/specifications/2.2/specs/C2PA_Specification) for the claim/action format.
+
+To verify bank signatures, create `input/BankTrust.json` or set `BANKSTMT_TRUST_CONFIG` to its path. Example:
+
+```json
+{
+  "trusted_sources": {
+    "statement.pdf": "64-character SHA-256 digest obtained independently from the bank"
+  },
+  "banks": {
+    "axis": {
+      "trust_roots": ["certs/axis-root.pem"],
+      "signer_sha256": ["lowercase SHA-256 fingerprint of bank signer certificate DER"]
+    }
+  }
+}
+```
+
+Certificate paths are relative to the configuration file. Obtain the reference hash, trust root and signer fingerprint independently from the bank. Signature verification is offline and requires usable revocation evidence, an intact trust chain, the pinned signer, and coverage of the entire current file before reporting a verified bank signature. Missing trust material or revocation evidence remains a warning. The comparison only establishes authenticity to the extent that the configured bank evidence is genuine and protected from alteration.
 
 ### `Statement`
 
 The complete normalized, merged dataset. Repeated rows within a PDF are preserved. Cross-PDF overlap removal requires the same known, unmasked account and at least two adjacent exact transaction matches including running balances. Missing identity or ambiguous single matches are retained. Internal identity fields are not exported.
 
 ### `Ret_Rej`
+
+Cheque return/rejection notices are retained in `Statement`, including entries with blank or zero debit and credit. They receive a Statement serial number and appear in `Ret_Rej` with that same number. Their narration and cheque number are retained; a cheque amount mentioned in the narration is not invented as a debit or credit. Cheque-return rows are protected from transaction overlap deduplication.
+
+Notices without debit/credit movement do not reset the running account balance or the monthly closing balance. Reconciliation accepts the bank's printed count with or without these notices, while still checking debit and credit totals. The Indian Bank parser handles these notices in both supported layouts and reports an error rather than silently omitting a recognized return whose nonzero amounts cannot be read.
+
+Cheque return/rejection notices are retained in `Statement`, including entries with blank or zero debit and credit. They receive a Statement serial number and appear in `Ret_Rej` with that same number. Their narration and cheque number are retained; a cheque amount mentioned in the narration is not invented as a debit or credit. Cheque-return rows are protected from transaction overlap deduplication.
+
+Notices without debit/credit movement do not reset the running account balance or the monthly closing balance. Reconciliation accepts the bank's printed count with or without these notices, while still checking debit and credit totals. The Indian Bank parser handles these notices in both supported layouts and reports an error rather than silently omitting a recognized return whose nonzero amounts cannot be read.
 
 Cheque return/rejection transactions only, for both issued and deposited cheques and either debit or credit entries. Shared detection lives in `src/transform/cheque_returns.py` and recognizes cheque/clearing/CTS context with return, rejection, dishonour, bounce, unpaid, and abbreviated RTN/RETD/RET/REJ descriptions in either word order. Recognized reasons include insufficient funds, exceeds arrangement, stopped payment, signature issues, closed/frozen/blocked accounts, and stale or post-dated cheques.
 

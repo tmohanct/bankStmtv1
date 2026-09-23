@@ -27,7 +27,7 @@ from src.export.final_excel_builder import (
 from src.parsers import detector
 from src.parsers.parser_registry import PARSER_REGISTRY
 from src.transform.normalize import records_to_dataframe
-from src.transform.validate import ReconciliationResult, reconcile, validate_records
+from src.transform.validate import ReconciliationResult, check_running_balances, reconcile, validate_records
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -74,6 +74,15 @@ class PipelineValidationTests(unittest.TestCase):
         intermediate.assert_called_once()
         final.assert_called_once()
 
+    def test_embedded_filename_password_is_not_logged(self):
+        self.pdf = self.pdf.with_name('sample$secret-value.pdf')
+        self.pdf.write_bytes(b'fixture path only; parser mocked')
+        code, _, _ = self.run_pipeline([record()], ReconciliationResult('unavailable'))
+        self.assertEqual(code, 0)
+        logs = list((self.root / 'src' / 'logs').glob('*.log'))
+        self.assertEqual(len(logs), 1)
+        self.assertNotIn('secret-value', logs[0].read_text(encoding='utf-8'))
+
     def test_invalid_records_are_rejected(self):
         for changes in ({"Date": "31/02/2026"}, {"Debit": "invalid"}, {"Balance": float("inf")}, {"Credit": 10}, {"Debit": None}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -90,6 +99,35 @@ class PipelineValidationTests(unittest.TestCase):
             self.assertEqual(len(result.mismatches), 2)
         with patch("src.transform.validate.extract_summary_metrics", return_value={}):
             self.assertEqual(reconcile([record()], "sample.pdf", logger).status, "unavailable")
+
+    def test_running_balance_check_supports_both_statement_orders(self):
+        ascending = [record(Date='01/01/2026', Balance=900),
+                     record(Date='02/01/2026', Debit=50, Balance=850)]
+        self.assertEqual(check_running_balances(ascending).status, 'passed')
+        ascending[1]['Balance'] = 800
+        self.assertEqual(check_running_balances(ascending).status, 'mismatch')
+        descending = list(reversed([record(Date='01/01/2026', Debit=50, Balance=950),
+                                    record(Date='02/01/2026', Debit=50, Balance=900)]))
+        self.assertEqual(check_running_balances(descending).status, 'passed')
+
+    def test_cheque_notices_survive_validation_and_reconcile(self):
+        logger = logging.getLogger("test.cheque_notice")
+        for amount in (None, "", 0, 0.0):
+            notice = record(Details="cheque rejected Chq:059010", Debit=amount, Credit=amount, Balance=0)
+            rows = [record(Debit=100, Balance=900), notice, record(Debit=50, Balance=850)]
+            validate_records(rows)
+            self.assertEqual(check_running_balances(rows).status, "passed")
+            for count in (2, 3):
+                with patch("src.transform.validate.extract_summary_metrics", return_value={
+                    "transaction_count": count, "total_debit": 150, "total_credit": 0,
+                }):
+                    self.assertEqual(reconcile(rows, "sample.pdf", logger).status, "passed")
+            rows[-1]["Balance"] = 800
+            result = check_running_balances(rows)
+            self.assertEqual(result.status, "mismatch")
+            self.assertIn("Rows 1-3", result.mismatches[0])
+        with patch("src.transform.validate.extract_summary_metrics", return_value={"transaction_count": 4}):
+            self.assertEqual(reconcile(rows, "sample.pdf", logger).status, "failed")
 
     def test_only_unmasked_identity_enables_deduplication(self):
         logger = logging.getLogger("test.identity")

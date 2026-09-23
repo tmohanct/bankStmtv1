@@ -19,8 +19,8 @@ from src.parsers.parser_registry import PARSER_REGISTRY as PARSERS
 from src.export.final_excel_builder import build_final_workbook
 from src.export.excel_writer import write_output_excel
 from src.transform.normalize import records_to_dataframe, remove_exact_duplicate_transactions
-from src.transform.validate import reconcile, validate_records
-from src.utils.statement_utils import prepare_pdf_for_reading, resolve_pdf_path, split_pdf_filename_metadata
+from src.transform.validate import check_running_balances, reconcile, validate_records
+from src.utils.statement_utils import prepare_pdf_for_reading, resolve_pdf_path, safe_pdf_display_name, split_pdf_filename_metadata
 from src.utils.pdf_status_reader import read_first_page
 from src.utils.ocr import observe_ocr
 from src.storage.run_history import RunHistory, database_path, file_sha256, source_version, transaction_metrics
@@ -68,14 +68,19 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def setup_logger(log_file: Path) -> logging.Logger:
+def setup_logger(log_file: Path, redact=None) -> logging.Logger:
     logger = logging.getLogger("bank_stmt_parser")
     logger.setLevel(logging.DEBUG)
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
         handler.close()
 
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    class RedactingFormatter(logging.Formatter):
+        def format(self, record):
+            message = super().format(record)
+            return redact(message) if redact else message
+
+    formatter = RedactingFormatter("%(asctime)s | %(levelname)s | %(message)s")
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
@@ -368,7 +373,7 @@ def _run(argv, history: RunHistory) -> int:
         return 2
 
     log_file = logs_dir / f"{output_stem}_run_{history.run_id}.log"
-    logger = setup_logger(log_file)
+    logger = setup_logger(log_file, history.redact)
     logger.addHandler(history.warning_counter)
     logger.info(
         "Run started | requested_bank=%s | files=%s | output=%s",
@@ -381,6 +386,7 @@ def _run(argv, history: RunHistory) -> int:
         history.save(log_path=str(log_file))
         merged_records: list[dict[str, object]] = []
         source_pdf_passwords: list[str | None] = []
+        source_audits: list[dict[str, object]] = []
         saw_progress = False
 
         temp_dir = build_temp_work_dir(output_dir)
@@ -408,7 +414,7 @@ def _run(argv, history: RunHistory) -> int:
                 history.save()
 
                 print(
-                    f"Starting file {index}/{len(pdf_paths)}: {pdf_path.name} | bank: {bank_key}",
+                    f"Starting file {index}/{len(pdf_paths)}: {safe_pdf_display_name(pdf_path)} | bank: {bank_key}",
                     flush=True,
                 )
                 logger.info(
@@ -420,7 +426,7 @@ def _run(argv, history: RunHistory) -> int:
                 )
                 base_count = len(merged_records)
                 ticker = RuntimeStatusTicker(
-                    file_name=pdf_path.name,
+                    file_name=safe_pdf_display_name(pdf_path),
                     file_index=index,
                     total_files=len(pdf_paths),
                 )
@@ -439,7 +445,10 @@ def _run(argv, history: RunHistory) -> int:
 
                 history.stage = "validation"
                 history.active["transaction_count"] = len(records)
-                validate_records(records, pdf_path.name)
+                validate_records(records, safe_pdf_display_name(pdf_path))
+                balance_check = check_running_balances(records)
+                if balance_check.status == "mismatch":
+                    logger.warning("Running balance check found %s mismatch(es) in %s", len(balance_check.mismatches), safe_pdf_display_name(pdf_path))
                 history.active.update(transaction_metrics(records))
 
                 if records:
@@ -447,31 +456,35 @@ def _run(argv, history: RunHistory) -> int:
                     saw_progress = True
 
                 print(
-                    f"Completed file {index}/{len(pdf_paths)}: {pdf_path.name} | rows parsed: {len(records)}",
+                    f"Completed file {index}/{len(pdf_paths)}: {safe_pdf_display_name(pdf_path)} | rows parsed: {len(records)}",
                     flush=True,
                 )
                 report_negative_balance_rows(
                     records=records,
-                    file_name=pdf_path.name,
+                    file_name=safe_pdf_display_name(pdf_path),
                     bank_key=bank_key,
                     logger=logger,
                 )
                 history.stage = "reconciliation"
-                result = reconcile(records, str(readable_pdf_path), logger)
+                result = reconcile(
+                    records, str(readable_pdf_path), logger,
+                    summary_extractor=getattr(parser_module, "extract_summary_metrics", None),
+                )
                 history.active["reconciliation_status"] = result.status
                 if result.status == "failed":
-                    raise ValueError(f"Reconciliation failed for {pdf_path.name}: " + "; ".join(result.mismatches))
+                    raise ValueError(f"Reconciliation failed for {safe_pdf_display_name(pdf_path)}: " + "; ".join(result.mismatches))
                 if result.status == "unavailable":
-                    print(f"Reconciliation unavailable for {pdf_path.name}: no printed summary totals found.", flush=True)
+                    print(f"Reconciliation unavailable for {safe_pdf_display_name(pdf_path)}: no printed summary totals found.", flush=True)
 
                 if len(pdf_paths) > 1:
                     account_key = account_identity(readable_pdf_path, bank_key, logger)
                     for row in records:
-                        row["Source"] = pdf_path.name
+                        row["Source"] = safe_pdf_display_name(pdf_path)
                         row["_Source_Id"] = str(pdf_path.resolve())
                         row["_Account_Key"] = account_key
 
                 merged_records.extend(records)
+                source_audits.append({"bank": bank_key, "balance_check": balance_check})
                 history.complete_input()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -519,12 +532,13 @@ def _run(argv, history: RunHistory) -> int:
             logger=logger,
             source_pdf_paths=pdf_paths,
             source_pdf_passwords=source_pdf_passwords,
+            source_audits=source_audits,
             include_source=len(pdf_paths) > 1,
         )
 
         history.save(output_path=str(final_output))
         print(f"Intermediate output written: {intermediate_output}")
-        print(f"Files processed: {', '.join(path.name for path in pdf_paths)}")
+        print(f"Files processed: {', '.join(safe_pdf_display_name(path) for path in pdf_paths)}")
         print(f"Final output written: {final_output}")
         print(f"Log file written: {log_file}")
 
@@ -535,7 +549,7 @@ def _run(argv, history: RunHistory) -> int:
         history.error(exc)
         print()
         logger.exception("Run failed")
-        print(f"Error: {exc}")
+        print(f"Error: {history.redact(str(exc))}")
         print(f"Check log file: {log_file}")
         return 1
     finally:

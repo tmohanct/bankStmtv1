@@ -1,5 +1,6 @@
 """PDF_Status regressions using synthetic PDFs, without customer data."""
 import hashlib
+import json
 from io import BytesIO
 import tempfile
 import unittest
@@ -10,7 +11,7 @@ import fitz
 from openpyxl import Workbook, load_workbook
 
 from src.export import final_excel_builder as builder
-from src.transform.pdf_status import inspect_pdf, metadata_datetime
+from src.transform.pdf_status import inspect_pdf, metadata_datetime, visual_text_evidence
 from src.utils.pdf_status_reader import read_first_page
 
 
@@ -58,6 +59,32 @@ class PDFStatusTests(unittest.TestCase):
             'Customer Name': 'TEST TRADERS', 'Bank Name': 'Axis Bank',
             'Account Number': '000123456789', 'Address': '12 TEST ROAD',
             'Statement Date Between': '2026-01-01 to 2026-01-31'})
+
+    def test_indian_bank_unlabelled_customer_block_and_statement_dates(self):
+        with fitz.open() as doc:
+            page = doc.new_page()
+            entries = (
+                (220, 75, 'STATEMENT OF ACCOUNT'),
+                (40, 95, 'SAMPLE PUBLIC SCHOOL'), (310, 95, 'INDIAN BANK'),
+                (40, 110, 'VILLAGE PANCHAYAT'), (310, 110, 'SAMPLE BRANCH'),
+                (40, 125, 'AMBASAMUDRAM'), (310, 125, 'BANK ROAD'),
+                (40, 140, 'THENI'), (40, 155, '625517'),
+                (40, 175, 'Account No : 7903539082'),
+                (310, 190, 'IFSC Code : IDIB000G036'),
+                (310, 215, 'Statement From :01-Nov-2025'),
+                (310, 230, 'To :18-Sep-2026'),
+                (40, 310, 'Post Date Value Date Details Debit Credit Balance'),
+            )
+            for x, y, text in entries:
+                page.insert_text((x, y), text, fontsize=9)
+            doc.save(self.path)
+        result = read_first_page(self.path, allow_ocr=False)
+        self.assertEqual(result.values, {
+            'Customer Name': 'SAMPLE PUBLIC SCHOOL', 'Bank Name': 'Indian Bank',
+            'Account Number': '7903539082',
+            'Address': 'VILLAGE PANCHAYAT AMBASAMUDRAM THENI 625517',
+            'Statement Date Between': '2025-11-01 to 2026-09-18',
+        })
 
     def test_hdfc_slogan_is_not_customer_or_address_in_text_and_ocr(self):
         for ocr, slogan, customer in (
@@ -279,6 +306,15 @@ class PDFStatusTests(unittest.TestCase):
         self.assertEqual(rows[0]['Result'], 'Inconclusive - inspection has limitations')
         self.assertIn('Large raster images', rows[0]['Details'])
 
+    def test_visual_ocr_amount_disagreement_is_reported(self):
+        create_pdf(self.path)
+        with fitz.open(self.path) as doc, patch('src.utils.pdf_status_reader.ocr_words',
+                                              return_value=[(0, 0, 10, 10, '777.00')]):
+            reviewed, findings, errors = visual_text_evidence(doc, [1])
+        self.assertEqual(len(reviewed), 1)
+        self.assertIn('777.00', findings[0])
+        self.assertFalse(errors)
+
     def test_xmp_only_editor_is_reported(self):
         path = self.save_rewrite(lambda doc: doc.set_xml_metadata(
             '<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:xmp="http://ns.adobe.com/xap/1.0/">'
@@ -360,7 +396,7 @@ class PDFStatusTests(unittest.TestCase):
     def test_unverified_signature_does_not_make_overall_pass(self):
         rows = audit(self.signature_fixture())
         self.assertEqual(rows[0]['Status'], 'WARNING')
-        self.assertIn('cryptographic verification', rows[0]['Details'])
+        self.assertIn('Signature object could not be verified', rows[0]['Details'])
         evidence = next(r for r in rows if r['Check'] == 'Digital signature')
         self.assertIn('structural range valid', evidence['Details'])
 
@@ -500,9 +536,42 @@ class PDFStatusTests(unittest.TestCase):
 
     def test_customer_highlight_does_not_call_access_failure_an_edit(self):
         sheet = self.styled_audit(audit(self.path))
-        self.assertEqual(sheet['B1'].fill.fgColor.rgb[-6:], 'C00000')
+        self.assertEqual(sheet['B1'].fill.fgColor.rgb[-6:], 'F2F2F2')
+        self.assertIn('UNASSESSABLE:', sheet['B6'].value)
         self.assertIn('Cannot assess', sheet['B6'].value)
         self.assertNotIn('Content changes detected', sheet['B6'].value)
+
+    def test_embedded_filename_password_is_hidden_in_pdf_status(self):
+        self.path = self.path.with_name('statement$secret-value.pdf')
+        create_pdf(self.path)
+        frame = builder._build_pdf_status_sheet([self.path])
+        self.assertEqual(set(frame['PDF']), {'statement.pdf'})
+        self.assertNotIn('secret-value', frame.to_string())
+
+    def test_configured_reference_hash_match_and_mismatch(self):
+        create_pdf(self.path)
+        expected = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        (self.path.parent / 'BankTrust.json').write_text(
+            json.dumps({'trusted_sources': {'statement.pdf': expected}}), encoding='utf-8')
+        self.assertEqual(audit(self.path)[0]['Result'], 'Reference match or bank signature verified')
+        with fitz.open(self.path) as doc:
+            doc.set_metadata({'title': 'new copy'})
+            doc.saveIncr()
+        self.assertEqual(audit(self.path)[0]['Result'], 'Source differs from configured reference')
+
+    def test_balance_mismatch_is_a_distinct_review_finding(self):
+        from src.transform.validate import check_running_balances
+
+        create_pdf(self.path)
+        transactions = [
+            {'Date': '01/01/2026', 'Debit': 100, 'Credit': None, 'Balance': 900},
+            {'Date': '02/01/2026', 'Debit': 100, 'Credit': None, 'Balance': 850},
+        ]
+        result = check_running_balances(transactions)
+        rows = inspect_pdf(self.path, first_page=read_first_page(self.path, allow_ocr=False),
+                           audit={'balance_check': result})
+        self.assertEqual(rows[0]['Result'], 'Transaction integrity requires review')
+        self.assertEqual(next(r['Status'] for r in rows if r['Check'] == 'Running balance consistency'), 'WARNING')
 
     def test_clean_pdf_customer_row_remains_neutral(self):
         create_pdf(self.path)

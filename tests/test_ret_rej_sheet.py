@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 
 
 from src.transform.analysis import (
+    _build_month_dr_cr_sheet,
     _build_repeat_sheet,
     _build_return_reject_sheet,
 )
@@ -106,6 +107,54 @@ class RepeatAmountSheetTests(unittest.TestCase):
         self.assertEqual(result["Sno"].tolist(), [4, 2, 3, 1])
 
 class ReturnRejectSheetTests(unittest.TestCase):
+    def test_month_end_balance_ignores_notice_zero_balance(self) -> None:
+        frame = pd.DataFrame([
+            {"Sno": 1, "Date": "30/06/2026", "Details": "Paid vendor", "Debit": 100, "Credit": 0, "Balance": 900},
+            {"Sno": 2, "Date": "30/06/2026", "Details": "CHQ REJECTED 059010", "Debit": 0, "Credit": 0, "Balance": 0},
+        ])
+        result = _build_month_dr_cr_sheet(frame)
+        self.assertEqual(result.iloc[0]["EOM Balance"], 900)
+        self.assertEqual(result.iloc[0]["Dr"], 100)
+
+    def test_nonposting_notice_appears_in_statement_and_ret_rej(self) -> None:
+        statement_df = _statement_frame()
+        notice = {
+            "Sno": 6, "Date": "30/06/2026",
+            "Details": "ClgInwRet Chq:059010 Amt:100000.00 Rtn:12 Drawer s/",
+            "Detail_Clean": clean_detail("ClgInwRet Chq:059010 Amt:100000.00 Rtn:12 Drawer s/"),
+            "Cheque No": "059010", "Debit": 0.0, "Credit": 0.0,
+            "Balance": 0.0, "Source": "indian.pdf",
+        }
+        statement_df = pd.DataFrame.from_records([*statement_df.to_dict("records"), notice])
+        result = _build_return_reject_sheet(statement_df)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result.iloc[-1]["Cheque No"], "059010")
+        self.assertEqual(result.iloc[-1]["Debit"], 0)
+        self.assertEqual(len(statement_df), 6)
+
+        logger = logging.getLogger("tests.ret_rej_sheet")
+        with tempfile.TemporaryDirectory(prefix="ret_rej_notice_") as temp_directory:
+            temp_root = Path(temp_directory)
+            rules_path = temp_root / "Rules.xlsx"
+            pd.DataFrame(columns=["Category", "subCategory", "SheetName"]).to_excel(rules_path, index=False)
+            final_path = build_final_workbook(
+                statement_df=statement_df, rules_path=rules_path,
+                output_dir=temp_root / "output", pdf_stem="sample", logger=logger,
+            )
+            workbook = load_workbook(final_path, data_only=True)
+            self.assertEqual(workbook["Statement"].max_row, 7)
+            ret_rej = workbook["Ret_Rej"]
+            headers = [cell.value for cell in ret_rej[1]]
+            cheque_col = headers.index("Cheque No") + 1
+            details_col = headers.index("Details") + 1
+            self.assertEqual(ret_rej.max_row, 4)
+            self.assertEqual(ret_rej.cell(4, cheque_col).value, "059010")
+            self.assertIn("Amt:100000.00", ret_rej.cell(4, details_col).value)
+            self.assertEqual(workbook["Statement"].cell(7, cheque_col).value, "059010")
+            self.assertEqual(ret_rej.cell(4, 1).value, 6)
+            self.assertEqual(workbook["Statement"].cell(7, 1).value, 6)
+            workbook.close()
+
     def test_build_return_reject_sheet_keeps_only_related_rows(self) -> None:
         result = _build_return_reject_sheet(_statement_frame())
 

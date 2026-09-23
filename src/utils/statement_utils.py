@@ -349,6 +349,12 @@ def split_pdf_filename_metadata(pdf_path: Path | str) -> tuple[str, str | None]:
     return plain_stem, derived_password or None
 
 
+def safe_pdf_display_name(pdf_path: Path | str) -> str:
+    """Return a PDF filename without an embedded opening password."""
+    stem, _ = split_pdf_filename_metadata(pdf_path)
+    return stem + Path(pdf_path).suffix
+
+
 def _resolve_with_dollar_suffix(candidate: Path) -> Path | None:
     parent = candidate.parent if str(candidate.parent) not in {"", "."} else Path(".")
     suffix = candidate.suffix or ".pdf"

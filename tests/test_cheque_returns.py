@@ -27,6 +27,7 @@ class ChequeReturnClassificationTests(unittest.TestCase):
             "CHQRETURN123456", "IWCHQRET123456", "OWCHQRTN123456",
             "RETURNCHQ123456", "CTSRETURN123456", "IWREJINST123456",
             "CHQRETURNISSUED123456", "CHQ\nRTN:123456",
+            "ClgInwRet Chq:059010", "clgoutwrej CHQ:123456",
         ]
         for details in descriptions:
             with self.subTest(details=details):

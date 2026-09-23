@@ -13,6 +13,12 @@ def transaction(serial, source="a.pdf", account="axis:123456789", **values):
 
 
 class TransactionDeduplicationTests(unittest.TestCase):
+    def test_cheque_returns_are_never_removed_as_overlap(self):
+        rows = [transaction(1), transaction(2, Details="CHQ REJECTED", Detail_Clean="CHQREJECTED"),
+                transaction(3, "b.pdf"),
+                transaction(4, "b.pdf", Details="CHQ REJECTED", Detail_Clean="CHQREJECTED")]
+        self.assertEqual(self.dedup(rows)["Sno"].tolist(), [1, 2, 4])
+
     def dedup(self, rows):
         return remove_exact_duplicate_transactions(pd.DataFrame(rows))
 
