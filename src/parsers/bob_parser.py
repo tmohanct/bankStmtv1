@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 import pdfplumber
+from src.transform.cheque_returns import is_cheque_return
 from src.utils.parser_helpers import build_record, parse_signed_balance
 from src.utils.statement_utils import clean_cell, parse_amount
 
@@ -265,10 +266,16 @@ def _build_pending(block: list[WordLine], layout: WordLayout) -> PendingRecord |
                 continue
 
     if not balance_candidates or not amount_candidates:
-        return None
-
-    amount_top, amount_left, amount_text = max(amount_candidates, key=lambda item: (item[0], item[1]))
-    _, _, balance_text = max(balance_candidates, key=lambda item: (item[0], item[1]))
+        if not is_cheque_return(" ".join(_line_text(line) for line in block)):
+            return None
+    amount_top, amount_left, amount_text = (
+        max(amount_candidates, key=lambda item: (item[0], item[1]))
+        if amount_candidates else (-1.0, float("inf"), "")
+    )
+    balance_text = (
+        max(balance_candidates, key=lambda item: (item[0], item[1]))[2]
+        if balance_candidates else ""
+    )
 
     filtered_detail_lines: list[str] = []
     for line in block:

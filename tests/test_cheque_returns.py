@@ -46,7 +46,7 @@ class ChequeReturnClassificationTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.assertTrue(is_cheque_return("CHQ 123456 " + reason))
                 self.assertTrue(is_cheque_return(reason, "00123456"))
-                self.assertFalse(is_cheque_return(reason))
+                self.assertTrue(is_cheque_return(reason))
         for details in ("STALE CHEQUE 123456", "POST DATED CHEQUE 123456", "CHEQUE STALE"):
             with self.subTest(details=details):
                 self.assertTrue(is_cheque_return(details))
@@ -55,10 +55,10 @@ class ChequeReturnClassificationTests(unittest.TestCase):
         for details in ("RETURN 123456", "REJECT:123456:Reason 01", "PAYMENT RETURN", "UNPAID"):
             with self.subTest(details=details):
                 self.assertTrue(is_cheque_return(details, 123456.0))
-                self.assertFalse(is_cheque_return(details))
-        for number in (None, "", "000000", "reference", "123ABC", float("nan"), pd.NA):
+                self.assertTrue(is_cheque_return(details))
+        for number in (None, "", "000000", "-12", 0, -12, "reference", "123ABC", float("nan"), pd.NA):
             with self.subTest(number=number):
-                self.assertFalse(is_cheque_return("RETURN", number))
+                self.assertTrue(is_cheque_return("RETURN", number))
 
     def test_electronic_returns_are_excluded_even_with_cheque_numbers(self):
         descriptions = [

@@ -13,6 +13,7 @@ from PIL import Image
 import pytesseract
 from typing import Any
 import pdfplumber
+from src.transform.cheque_returns import is_cheque_return
 from src.utils.ocr import find_tesseract, record_ocr_use
 from src.utils.statement_utils import clean_cell, clean_detail, normalize_date, parse_amount
 
@@ -423,8 +424,12 @@ TRANSACTION_LINE_RE = re.compile(
     r"^(?P<date>\d{2}/\d{2}/\d{2})\s+"
     r"(?P<body>.+?)\s+"
     r"(?P<value_date>\d{2}/\d{2}/\d{2})\s+"
-    r"(?P<amount>[\-0-9,]+\.\d{2})\s+"
-    r"(?P<balance>[\-0-9,]+\.\d{2})$"
+    r"(?P<amount>[\-0-9,]+\.\d{2}|-)\s+"
+    r"(?P<balance>[\-0-9,]+\.\d{2}|-)$"
+)
+RETURN_NOTICE_LINE_RE = re.compile(
+    r"^(?P<date>\d{2}/\d{2}/\d{2})\s+(?P<body>.+?)\s+"
+    r"(?P<value_date>\d{2}/\d{2}/\d{2})(?:\s+(?P<tail>.*))?$"
 )
 TABLE_HEADER_TEXT = "Date Narration Chq./Ref.No. ValueDt WithdrawalAmt. DepositAmt. ClosingBalance"
 PAGE_HEADER_END_PREFIX = "StatementFrom :"
@@ -459,8 +464,8 @@ class PendingRecord:
     date_text: str
     detail_head: str
     cheque_no: str
-    amount_value: float
-    balance_value: float
+    amount_value: float | None
+    balance_value: float | None
     continuation_lines: list[str] = field(default_factory=list)
 
 
@@ -478,11 +483,11 @@ def _split_body(body: str) -> tuple[str, str]:
 def _classify_amount(
     details: str,
     amount_value: float,
-    balance_value: float,
+    balance_value: float | None,
     previous_balance: float | None,
 ) -> tuple[float | None, float | None]:
     abs_amount = abs(amount_value)
-    if previous_balance is not None:
+    if previous_balance is not None and balance_value is not None:
         delta = round(balance_value - previous_balance, 2)
         if abs(abs(delta) - abs_amount) <= 0.1:
             if amount_value < 0:
@@ -500,7 +505,7 @@ def _classify_amount(
         return None, amount_value if amount_value < 0 else abs_amount
     if any(token in upper_details for token in DEBIT_HINTS):
         return amount_value if amount_value < 0 else abs_amount, None
-    if previous_balance is not None and balance_value >= previous_balance:
+    if previous_balance is not None and balance_value is not None and balance_value >= previous_balance:
         return None, amount_value if amount_value < 0 else abs_amount
     return amount_value if amount_value < 0 else abs_amount, None
 
@@ -508,13 +513,15 @@ def _classify_amount(
 def _finalize_record(
     pending: PendingRecord,
     previous_balance: float | None,
-) -> tuple[dict[str, Any], float]:
+) -> tuple[dict[str, Any], float | None]:
     details = clean_cell(" ".join([pending.detail_head, *pending.continuation_lines]))
-    debit, credit = _classify_amount(
-        details=details,
-        amount_value=pending.amount_value,
-        balance_value=pending.balance_value,
-        previous_balance=previous_balance,
+    debit, credit = (None, None) if pending.amount_value is None else _classify_amount(
+        details=details, amount_value=pending.amount_value,
+        balance_value=pending.balance_value, previous_balance=previous_balance,
+    )
+    next_balance = (
+        previous_balance if pending.balance_value in (None, 0) and debit is None and credit is None
+        else pending.balance_value if pending.balance_value is not None else previous_balance
     )
     return (
         {
@@ -527,7 +534,7 @@ def _finalize_record(
             "Credit": credit,
             "Balance": pending.balance_value,
         },
-        pending.balance_value,
+        next_balance,
     )
 
 
@@ -577,7 +584,7 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
                     if line.startswith(PAGE_HEADER_END_PREFIX):
                         page_header_complete = True
                         continue
-                    if statement_started and TRANSACTION_LINE_RE.match(line):
+                    if statement_started and (TRANSACTION_LINE_RE.match(line) or RETURN_NOTICE_LINE_RE.match(line)):
                         page_header_complete = True
                     else:
                         continue
@@ -596,11 +603,12 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
                 if match:
                     if pending is not None:
                         raw_records.append(pending)
+                        pending = None
 
                     detail_head, cheque_no = _split_body(match.group("body"))
                     amount_value = parse_amount(match.group("amount"))
                     balance_value = parse_amount(match.group("balance"))
-                    if amount_value is None or balance_value is None:
+                    if (amount_value is None or balance_value is None) and not is_cheque_return(detail_head, cheque_no):
                         continue
 
                     pending = PendingRecord(
@@ -609,6 +617,21 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
                         cheque_no=cheque_no,
                         amount_value=amount_value,
                         balance_value=balance_value,
+                    )
+                    continue
+
+                notice_match = RETURN_NOTICE_LINE_RE.match(line)
+                if notice_match and is_cheque_return(notice_match.group("body")):
+                    if pending is not None:
+                        raw_records.append(pending)
+                        pending = None
+                    detail_head, cheque_no = _split_body(notice_match.group("body"))
+                    pending = PendingRecord(
+                        date_text=notice_match.group("date"),
+                        detail_head=clean_cell(f"{detail_head} {notice_match.group('tail') or ''}"),
+                        cheque_no=cheque_no,
+                        amount_value=None,
+                        balance_value=None,
                     )
                     continue
 

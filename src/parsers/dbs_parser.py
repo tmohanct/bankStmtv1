@@ -7,6 +7,7 @@ from typing import Any
 import pdfplumber
 from src.utils.statement_utils import clean_cell, clean_detail, is_date_token, normalize_date, parse_amount, parse_with_config
 from src.transform.normalize import normalize_cheque_number
+from src.transform.cheque_returns import is_cheque_return
 
 
 # PDF_Status only. Transaction parsing does not use this profile.
@@ -108,22 +109,18 @@ def _amount_between(
 
 def _positioned_transaction_line(
     words: list[dict[str, Any]],
-) -> tuple[str, str, str, float | None, float | None, float] | None:
+) -> tuple[str, str, str, float | None, float | None, float | None] | None:
     transaction_date = _date_between(words, 25.0, 90.0)
     value_date = _date_between(words, 90.0, DETAILS_LEFT)
     if not transaction_date or not value_date:
         return None
 
     balance = _amount_between(words, BALANCE_LEFT, 580.0)
-    if balance is None:
-        return None
-
     debit = _amount_between(words, DEBIT_LEFT, DEBIT_RIGHT)
     credit = _amount_between(words, CREDIT_LEFT, CREDIT_RIGHT)
-    if debit is None and credit is None:
-        return None
-
     details = _text_between(words, DETAILS_LEFT, DETAILS_RIGHT)
+    if (balance is None or (debit is None and credit is None)) and not is_cheque_return(details):
+        return None
     return transaction_date, value_date, details, debit, credit, balance
 
 

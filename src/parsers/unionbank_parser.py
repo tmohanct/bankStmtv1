@@ -10,6 +10,7 @@ from typing import Any, Callable
 import pandas as pd
 import pdfplumber
 from src.parsers.base_parser import BaseStatementParser
+from src.transform.cheque_returns import is_cheque_return
 
 
 DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{4}$")
@@ -107,7 +108,9 @@ def _build_record(
     credit: float | None,
     balance: float | None,
 ) -> dict[str, Any] | None:
-    if not details or balance is None or (debit is None and credit is None):
+    if not details:
+        return None
+    if (balance is None or (debit is None and credit is None)) and not is_cheque_return(details, cheque_number):
         return None
 
     return {

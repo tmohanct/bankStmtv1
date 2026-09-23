@@ -1,7 +1,8 @@
 """Classify cheque return transactions, excluding fees and electronic returns.
 
-These are narration heuristics, not a bank return-code catalogue. A reason or
-return word must have cheque/clearing context (or a usable cheque number).
+These are narration heuristics, not a bank return-code catalogue. Cheque or
+clearing context is helpful but a missing or invalid cheque number must not
+hide a return/rejection transaction.
 """
 from __future__ import annotations
 
@@ -68,6 +69,10 @@ COMPACT_NON_EVENT_RE = re.compile(
     rf"|(?:{EVENT})[0-9]*(?:REVERSAL|REVERSED|RVSL)"
 )
 DATED_REASON_RE = _token(r"STALE|POST\s*DATED")
+GOODS_RETURN_RE = re.compile(
+    r"\b(?:(?:RETURN(?:ED)?|REJECT(?:ED|ION)?)\s+(?:GOODS?|PRODUCTS?|MERCHANDISE|ORDERS?)"
+    r"|(?:GOODS?|PRODUCTS?|MERCHANDISE|ORDERS?)\s+(?:RETURN(?:ED)?|REJECT(?:ED|ION)?))\b"
+)
 
 
 def _text(value: Any) -> str:
@@ -94,20 +99,13 @@ def is_cheque_return(details: Any, cheque_number: Any = "", detail_clean: Any = 
         return False
     if NEGATED_RE.search(text) or REVERSAL_RE.search(text) or COMPACT_NON_EVENT_RE.search(compact):
         return False
+    if GOODS_RETURN_RE.search(text) and not CONTEXT_RE.search(text):
+        return False
 
     compact_event = bool(COMPACT_EVENT_RE.search(compact))
-    context = bool(CONTEXT_RE.search(text)) or compact_event
-    number = re.sub(r"\.0+$", "", _text(cheque_number))
-    has_number = bool(re.fullmatch(r"[0-9]{1,18}", number)) and bool(number.strip("0"))
     event = bool(EVENT_RE.search(text)) or compact_event
     reason = bool(REASON_RE.search(compact) or DATED_REASON_RE.search(text))
-    if context:
-        return event or reason
-    # Without an explicit cheque label, require a cheque number and either a
-    # recognized reason or a narration starting with a return/rejection event.
-    # This avoids classifying e.g. GOODS RETURNED as a cheque event.
-    starts_with_event = bool(re.match(rf"^(?:PAYMENT\s+)?(?:{EVENT})(?![A-Z])", text))
-    return has_number and (reason or starts_with_event)
+    return event or reason
 
 
 def is_nonposting_cheque_return(row) -> bool:

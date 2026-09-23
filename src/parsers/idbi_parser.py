@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 import pdfplumber
+from src.transform.cheque_returns import is_cheque_return
 from src.utils.statement_utils import clean_cell, clean_detail, normalize_date, parse_amount
 
 
@@ -25,8 +26,14 @@ TRANSACTION_LINE_RE = re.compile(
     r"(?P<body>.+?)\s+"
     r"(?P<drcr>Dr\.|Cr\.)\s+"
     r"INR\s+"
-    r"(?P<amount>[0-9,]+\.\d{2})\s+"
-    r"(?P<balance>[0-9,]+\.\d{2})$"
+    r"(?P<amount>-?[0-9,]+\.\d{2}|-)\s+"
+    r"(?P<balance>-?[0-9,]+\.\d{2}|-)$"
+)
+RETURN_NOTICE_LINE_RE = re.compile(
+    r"^(?P<srl>\d+)\s+"
+    r"(?P<txn_ts>(?:\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M|\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}))\s+"
+    r"(?P<value_date>\d{1,2}/\d{1,2}/\d{4})\s+"
+    r"(?P<body>.+)$"
 )
 
 CHEQUE_TRAILER_RE = re.compile(r"^(?P<details>.+?)\s+(?P<cheque>\d{5,7})$")
@@ -39,7 +46,9 @@ def _parse_transaction_line(line: str) -> dict[str, Any] | None:
 
     match = TRANSACTION_LINE_RE.match(text)
     if not match:
-        return None
+        match = RETURN_NOTICE_LINE_RE.match(text)
+        if not match or not is_cheque_return(match.group("body")):
+            return None
 
     serial_no = int(match.group("srl"))
     value_date_raw = match.group("value_date")
@@ -54,20 +63,21 @@ def _parse_transaction_line(line: str) -> dict[str, Any] | None:
         details = clean_cell(cheque_match.group("details"))
         cheque_no = cheque_match.group("cheque")
 
-    amount = parse_amount(match.group("amount"))
-    balance = parse_amount(match.group("balance"))
-    if amount is None:
+    amount = parse_amount(match.groupdict().get("amount"))
+    balance = parse_amount(match.groupdict().get("balance"))
+    if amount is None and not is_cheque_return(details, cheque_no):
         return None
 
-    drcr = match.group("drcr").upper()
-    abs_amount = abs(amount)
+    drcr = (match.groupdict().get("drcr") or "").upper()
+    abs_amount = abs(amount) if amount is not None else None
 
     debit: float | None = None
     credit: float | None = None
-    if drcr.startswith("DR"):
-        debit = abs_amount
-    else:
-        credit = abs_amount
+    if abs_amount is not None:
+        if drcr.startswith("DR"):
+            debit = abs_amount
+        elif drcr.startswith("CR"):
+            credit = abs_amount
 
     return {
         "serial_no": serial_no,

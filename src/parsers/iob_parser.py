@@ -9,6 +9,7 @@ from typing import Callable
 import pandas as pd
 import pdfplumber
 from src.parsers.base_parser import BaseStatementParser
+from src.transform.cheque_returns import is_cheque_return
 from src.utils.amount_utils import parse_amount
 from src.utils.parser_helpers import build_record
 
@@ -21,10 +22,11 @@ IOB_CODE_VALUES = {"TRF", "CSH", "CLR"}
 TEXT_LAYOUT_TRANSACTION_RE = re.compile(
     r"^(?P<date>\d{2}-\d{2}-\d{4})\s+"
     r"(?P<narration>.+?)\s+"
-    r"(?P<amount>\d[\d,]*\.\d{2})(?P<direction>DR|CR)\s+"
+    r"(?P<amount>-?\d[\d,]*\.\d{2})(?P<direction>DR|CR)\s+"
     r"(?P<balance>-?\d[\d,]*\.\d{2})(?P<balance_direction>DR|CR)?$",
     re.IGNORECASE,
 )
+TEXT_LAYOUT_RETURN_NOTICE_RE = re.compile(r"^(?P<date>\d{2}-\d{2}-\d{4})\s+(?P<narration>.+)$")
 OUTPUT_COLUMNS = [
     "Date",
     "ValueDate",
@@ -143,7 +145,19 @@ def _build_text_layout_record(
     """
     match = TEXT_LAYOUT_TRANSACTION_RE.fullmatch(_clean_cell(line))
     if match is None:
-        return None
+        notice = TEXT_LAYOUT_RETURN_NOTICE_RE.fullmatch(_clean_cell(line))
+        if notice is None or not is_cheque_return(notice.group("narration")):
+            return None
+        txn_date = _parse_date_token(notice.group("date"))
+        if txn_date is None:
+            return None
+        return {
+            "Date": txn_date, "ValueDate": txn_date,
+            "Narration": _clean_cell(notice.group("narration")),
+            "Debit": None, "Credit": None, "Balance": None,
+            "Currency": "INR", "Account_Number": account_number,
+            "Txn_Ref": "", "Page": page_number,
+        }
 
     txn_date = _parse_date_token(match.group("date"))
     amount = parse_amount(match.group("amount"))

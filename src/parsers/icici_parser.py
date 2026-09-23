@@ -20,6 +20,7 @@ from itertools import product
 import fitz
 import pytesseract
 from PIL import Image
+from src.transform.cheque_returns import is_cheque_return
 from src.utils.statement_utils import clean_cell, clean_detail, parse_amount
 
 
@@ -230,16 +231,19 @@ def _parse_savings_page_lines(
 
         details = clean_cell(" ".join([mode_text, *detail_parts]))
 
+        is_notice = is_cheque_return(details) and deposit in (None, 0) and withdrawal in (None, 0)
         if deposit is None and withdrawal is None:
             if balance is not None and details.upper() in {"B/F", "BF", "B F"}:
                 previous_balance = balance
                 logger.debug("ICICI savings opening balance: %.2f", balance)
-            continue
-        if balance is None:
+                continue
+            if not is_notice:
+                continue
+        if balance is None and not is_cheque_return(details):
             logger.warning("ICICI savings row skipped without balance: date=%s details=%s", raw_date, details)
             continue
 
-        if previous_balance is not None:
+        if previous_balance is not None and balance is not None and not is_notice:
             expected_balance = round(previous_balance + (deposit or 0.0) - (withdrawal or 0.0), 2)
             if abs(expected_balance - balance) > 0.05:
                 logger.warning(
@@ -262,7 +266,8 @@ def _parse_savings_page_lines(
                 "Balance": balance,
             }
         )
-        previous_balance = balance
+        if balance is not None and not is_notice:
+            previous_balance = balance
 
     return records, previous_balance, True
 
@@ -765,7 +770,9 @@ def _extract_account_statement_block_seed(block_lines: list[TextLine]) -> TextRe
     balance_text = _merge_numeric_column_tokens(balance_tokens)
     detail_text = clean_cell(" ".join(detail_tokens))
 
-    if not raw_date or not amount_text or not balance_text or not detail_text:
+    if not raw_date or not detail_text:
+        return None
+    if (not amount_text or not balance_text) and not is_cheque_return(detail_text):
         return None
 
     return TextRecordSeed(
@@ -885,18 +892,15 @@ def _transaction_list_record_from_row(
     # whitespace reconstructs values such as '-\n2,54,79,975.4\n3'.
     balance_text = re.sub(r"\s+", "", str(row[8] or ""))
     balance_value = parse_amount(balance_text)
-    if drcr not in {"DR", "CR"} or amount_value is None or balance_value is None:
-        logger.warning(
-            "ICICI transaction-list row skipped with invalid amounts: serial=%s drcr=%s amount=%s balance=%s",
-            serial_text,
-            drcr,
-            row[7],
-            row[8],
-        )
-        return None
-
     details = clean_cell(row[5]) or clean_cell(row[1])
     cheque_number = clean_cell(row[4])
+    if ((drcr not in {"DR", "CR"} or amount_value is None or balance_value is None)
+            and not is_cheque_return(details, cheque_number)):
+        logger.warning(
+            "ICICI transaction-list row skipped with invalid amounts: serial=%s drcr=%s amount=%s balance=%s",
+            serial_text, drcr, row[7], row[8],
+        )
+        return None
     if cheque_number == "-":
         cheque_number = ""
     if not cheque_number:
@@ -961,7 +965,8 @@ def _parse_transaction_list_text(pdf_path: str, logger, progress_cb=None) -> lis
                     debit = record["Debit"] or 0.0
                     credit = record["Credit"] or 0.0
                     balance = record["Balance"]
-                    if previous_balance is not None:
+                    is_notice = is_cheque_return(record["Details"], record["Cheque No"]) and debit == 0 and credit == 0
+                    if previous_balance is not None and balance is not None and not is_notice:
                         expected_balance = round(previous_balance + credit - debit, 2)
                         if abs(expected_balance - balance) > 0.05:
                             logger.warning(
@@ -977,7 +982,8 @@ def _parse_transaction_list_text(pdf_path: str, logger, progress_cb=None) -> lis
                     records.append(record)
                     seen_serials.add(serial)
                     previous_serial = serial
-                    previous_balance = balance
+                    if balance is not None and not is_notice:
+                        previous_balance = balance
                     page_count += 1
                     if progress_cb is not None:
                         progress_cb(len(records))
@@ -1088,7 +1094,9 @@ def _extract_detailed_text_record_seed(block_lines: list[TextLine]) -> DetailedT
     balance_text = _merge_numeric_column_tokens(balance_tokens)
     detail_text = clean_cell(" ".join(detail_tokens))
 
-    if raw_date is None or not amount_text or not balance_text:
+    if raw_date is None:
+        return None
+    if (not amount_text or not balance_text) and not is_cheque_return(detail_text):
         return None
 
     return DetailedTextRecordSeed(
@@ -1132,7 +1140,10 @@ def _finalize_detailed_text_record(
         "Credit": credit,
         "Balance": balance_value,
     }
-    next_balance = balance_value if balance_value is not None else previous_balance
+    next_balance = (
+        previous_balance if debit is None and credit is None and is_cheque_return(seed.detail_text)
+        else balance_value if balance_value is not None else previous_balance
+    )
 
     logger.debug(
         "ICICI detailed text row parsed | date=%s debit=%s credit=%s balance=%s details=%s",
@@ -1238,7 +1249,10 @@ def _finalize_text_record(
         "Credit": credit,
         "Balance": balance_value,
     }
-    next_balance = balance_value if balance_value is not None else previous_balance
+    next_balance = (
+        previous_balance if debit is None and credit is None and is_cheque_return(detail_text)
+        else balance_value if balance_value is not None else previous_balance
+    )
 
     logger.debug(
         "ICICI text row parsed | date=%s debit=%s credit=%s balance=%s details=%s",
@@ -1559,7 +1573,10 @@ def _finalize_ocr_record(
         "Balance": balance_value,
     }
     next_date = parsed_date or previous_date
-    next_balance = balance_value if balance_value is not None else previous_balance
+    next_balance = (
+        previous_balance if debit is None and credit is None and is_cheque_return(detail_text)
+        else balance_value if balance_value is not None else previous_balance
+    )
     return record, next_balance, next_date
 
 def _parse_ocr(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:

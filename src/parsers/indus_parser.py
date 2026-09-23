@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 import pdfplumber
+from src.transform.cheque_returns import is_cheque_return
 from src.utils.parser_helpers import build_record
 from src.utils.statement_utils import clean_cell, parse_amount
 
@@ -27,9 +28,13 @@ PDF_STATUS_PROFILE.update({'address_is_branch': True})
 ROW_RE = re.compile(
     r"^(?P<date>\d{2} [A-Za-z]{3} \d{4})\s+"
     r"(?P<body>.+?)\s+"
-    r"(?P<debit>-|[0-9,]+\.\d{2})\s+"
-    r"(?P<credit>-|[0-9,]+\.\d{2})\s+"
+    r"(?P<debit>-|-?[0-9,]+\.\d{2})\s+"
+    r"(?P<credit>-|-?[0-9,]+\.\d{2})\s+"
     r"(?P<balance>-?[0-9,]+\.\d{2})$"
+)
+RETURN_NOTICE_RE = re.compile(
+    r"^(?P<date>\d{2} [A-Za-z]{3} \d{4})\s+(?P<body>.+?)"
+    r"(?:\s+(?P<balance>-?[0-9,]+\.\d{2}))?$"
 )
 DATE_FORMATS = ("%d %b %Y",)
 FOOTER_PREFIXES = (
@@ -99,6 +104,20 @@ def parse(pdf_path: str, logger, progress_cb=None) -> list[dict[str, Any]]:
                         debit_text=match.group("debit"),
                         credit_text=match.group("credit"),
                         balance_text=match.group("balance"),
+                    )
+                    continue
+
+                notice_match = RETURN_NOTICE_RE.match(line)
+                if notice_match and is_cheque_return(notice_match.group("body")):
+                    if pending is not None:
+                        records.append(_finalize_record(pending))
+                        if progress_cb is not None:
+                            progress_cb(len(records))
+                    pending = PendingRecord(
+                        date_text=notice_match.group("date"),
+                        detail_head=notice_match.group("body"),
+                        debit_text="-", credit_text="-",
+                        balance_text=notice_match.group("balance") or "",
                     )
                     continue
 

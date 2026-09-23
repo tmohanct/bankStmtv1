@@ -10,6 +10,7 @@ from typing import Any, Callable
 import pandas as pd
 import pdfplumber
 from src.parsers.base_parser import BaseStatementParser
+from src.transform.cheque_returns import is_cheque_return
 
 
 DATE_RE = re.compile(r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}$")
@@ -85,7 +86,9 @@ def parse_kotak_records(
                     debit = _parse_amount(withdrawal_text)
                     credit = _parse_amount(deposit_text)
                     balance = _parse_amount(balance_text)
-                    if not details or balance is None or (debit is None and credit is None):
+                    if not details:
+                        continue
+                    if (balance is None or (debit is None and credit is None)) and not is_cheque_return(details, reference):
                         continue
 
                     record = {

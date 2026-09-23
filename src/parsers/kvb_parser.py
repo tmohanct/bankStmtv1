@@ -11,6 +11,7 @@ import pytesseract
 from PIL import Image
 from src.utils.ocr import find_tesseract, record_ocr_use
 from src.utils.parser_helpers import build_record, normalize_date_with_formats
+from src.transform.cheque_returns import is_cheque_return
 from src.utils.statement_utils import clean_cell, parse_amount
 
 
@@ -330,7 +331,10 @@ def _finalize_record(
         balance=balance_value,
         date_formats=date_formats,
     )
-    next_balance = balance_value if balance_value is not None else previous_balance
+    next_balance = (
+        previous_balance if debit is None and credit is None and is_cheque_return(details_text, pending.cheque_no)
+        else balance_value if balance_value is not None else previous_balance
+    )
     return record, next_balance
 
 
@@ -605,7 +609,12 @@ def _parse_text_row(line: str) -> dict[str, str] | None:
 
     amount_matches = list(TEXT_AMOUNT_RE.finditer(rest))
     if not amount_matches:
-        return None
+        if not is_cheque_return(rest):
+            return None
+        return {
+            "date_text": match.group("date"), "body_text": rest,
+            "amount_text": "", "balance_text": "", "cheque_no": "",
+        }
 
     balance_text = amount_matches[-1].group(0)
     amount_text = amount_matches[-2].group(0) if len(amount_matches) >= 2 else ""
@@ -668,7 +677,7 @@ def _extract_opening_balance_from_text(page_text: str) -> float | None:
 
 def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
     normalized_lines = [clean_cell(line) for line in row_lines if clean_cell(line)]
-    if len(normalized_lines) < 4:
+    if len(normalized_lines) < 3:
         return None
 
     date_text = ""
@@ -719,7 +728,19 @@ def _parse_tokenized_text_row(row_lines: list[str]) -> PendingRecord | None:
         if _is_tokenized_text_amount(value)
     ]
     if len(amount_positions) < 2:
-        return None
+        balance_idx = amount_positions[-1] if amount_positions else len(normalized_lines)
+        body_text = clean_cell(" ".join(normalized_lines[cursor:balance_idx]))
+        body_text, cheque_no = _extract_trailing_cheque_no(body_text)
+        if not is_cheque_return(body_text, cheque_no):
+            return None
+        return PendingRecord(
+            date_text=date_text,
+            value_date_text=normalized_lines[cursor - 1],
+            body_text=body_text,
+            amount_text="",
+            balance_text=normalized_lines[balance_idx] if amount_positions else "",
+            cheque_no=cheque_no,
+        )
 
     amount_idx = amount_positions[-2]
     balance_idx = amount_positions[-1]

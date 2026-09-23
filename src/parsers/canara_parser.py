@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 import fitz
 from src.utils.parser_helpers import build_record
+from src.transform.cheque_returns import is_cheque_return
 from src.utils.statement_utils import clean_cell, parse_amount
 
 
@@ -120,6 +121,18 @@ def _finalize_record(
             numeric_lines.pop()
 
     if len(numeric_lines) < 2:
+        details = clean_cell(" ".join(
+            line for line in pending.lines
+            if not _is_amount_line(line) and not _should_skip_detail_line(line)
+        ))
+        if is_cheque_return(details):
+            record = build_record(
+                date_text=pending.date_text,
+                details=details,
+                balance=numeric_lines[-1][1] if numeric_lines else None,
+                date_formats=DATE_FORMATS,
+            )
+            return record, previous_balance
         return None, previous_balance
 
     amount_idx, amount_value = numeric_lines[-2]

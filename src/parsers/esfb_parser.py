@@ -10,10 +10,11 @@ from typing import Any, Callable
 import pandas as pd
 import pdfplumber
 from src.parsers.base_parser import BaseStatementParser
+from src.transform.cheque_returns import is_cheque_return
 
 
 DATE_RE = re.compile(r"^\d{2}-[A-Za-z]{3}-\d{4}$")
-AMOUNT_RE = re.compile(r"(?<!\d)(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?!\d)")
+AMOUNT_RE = re.compile(r"(?<![\d-])-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?!\d)")
 NARRATION_PREFIX_ARTIFACT_RE = re.compile(
     r"^\d+\s*(?=(?:IMP\s+P2A|UPI\s+REF\s+NO)\b)",
     re.IGNORECASE,
@@ -79,7 +80,7 @@ def _parse_transaction_row(row: list[str], source_page: int) -> dict[str, Any] |
     balance, balance_spillover = _parse_amount_cell(row[5])
     details = _clean_narration(row[2], debit_spillover, credit_spillover, balance_spillover)
 
-    if balance is None or (debit is None and credit is None):
+    if (balance is None or (debit is None and credit is None)) and not is_cheque_return(details, row[1]):
         return None
 
     return {

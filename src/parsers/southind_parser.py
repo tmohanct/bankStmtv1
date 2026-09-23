@@ -11,6 +11,7 @@ from typing import Any, Callable
 import fitz
 import pandas as pd
 from src.parsers.base_parser import BaseStatementParser
+from src.transform.cheque_returns import is_cheque_return
 
 
 TRANSACTION_DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{2}$")
@@ -133,7 +134,9 @@ class _PendingRecord:
         cheque_matches = re.findall(r"\d{3,}", cheque_joined)
         cheque_no = cheque_matches[0] if cheque_matches else cheque_joined
 
-        if not details or self.balance is None or (self.debit is None and self.credit is None):
+        if not details:
+            return None
+        if (self.balance is None or (self.debit is None and self.credit is None)) and not is_cheque_return(details, cheque_no):
             return None
 
         return {
@@ -355,7 +358,10 @@ def _build_slno_layout_record(region_lines: list[_WordLine]) -> dict[str, Any] |
     )
     balance = _first_amount_in_column(region_lines, SLNO_BALANCE_COLUMN_MIN_X)
 
-    if not date_text or not details or balance is None or (debit is None and credit is None):
+    if not date_text or not details:
+        return None
+    cheque_no = _extract_slno_cheque_no(region_lines)
+    if (balance is None or (debit is None and credit is None)) and not is_cheque_return(details, cheque_no):
         return None
 
     return {
@@ -363,7 +369,7 @@ def _build_slno_layout_record(region_lines: list[_WordLine]) -> dict[str, Any] |
         "Date": _normalize_output_date(date_text),
         "Details": details,
         "Detail_Clean": _clean_detail_key(details),
-        "Cheque No": _extract_slno_cheque_no(region_lines),
+        "Cheque No": cheque_no,
         "Debit": abs(debit) if debit is not None else None,
         "Credit": abs(credit) if credit is not None else None,
         "Balance": balance,

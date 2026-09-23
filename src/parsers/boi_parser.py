@@ -11,6 +11,7 @@ from typing import Any, Callable
 import fitz
 import pandas as pd
 from src.parsers.base_parser import BaseStatementParser
+from src.transform.cheque_returns import is_cheque_return
 
 
 DATE_RE = re.compile(r"^\d{2}-\d{2}-\d{4}$")
@@ -158,7 +159,8 @@ def _build_record(
 
     if not DATE_RE.fullmatch(date_text):
         return None, statement_serial
-    if balance is None:
+    is_return = is_cheque_return(details, cheque_no)
+    if balance is None and not is_return:
         logger.warning(
             "Skipped Bank of India row without a balance: page=%s serial=%s date=%s",
             source_page,
@@ -166,7 +168,8 @@ def _build_record(
             date_text,
         )
         return None, statement_serial
-    if (debit is None) == (credit is None):
+    nonposting_return = is_return and debit in (None, 0) and credit in (None, 0)
+    if (debit is None) == (credit is None) and not nonposting_return:
         logger.warning(
             "Skipped Bank of India row with ambiguous amount columns: "
             "page=%s serial=%s date=%s debit=%s credit=%s",
